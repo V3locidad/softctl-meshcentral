@@ -610,17 +610,34 @@ module.exports.softctl = function (parent) {
                             deployment.results[key] = { status: 'dispatch-failed', error: 'wsagent ciblage incohérent', time: Date.now() };
                             return;
                         }
+                        if (ws.readyState !== undefined && ws.readyState !== 1) {
+                            console.log('softctl: WS pas ouvert pour ' + nodeId + ' (readyState=' + ws.readyState + ')');
+                            results.push({ softId: s.id, nodeId: nodeId, ok: false, error: 'WS pas prêt' });
+                            deployment.results[key] = { status: 'dispatch-failed', error: 'WS pas prêt', time: Date.now() };
+                            return;
+                        }
                         try {
-                            ws.send(JSON.stringify({
+                            // Encode le script PS en UTF-16LE puis base64 (format
+                            // -EncodedCommand de PowerShell) et passe par cmd.exe.
+                            // Cette technique évite totalement les soucis de quoting
+                            // de l'agent MC qui transforme les chaînes envoyées.
+                            const psFull = ps + reportPs;
+                            const psB64 = Buffer.from(psFull, 'utf16le').toString('base64');
+                            const cmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + psB64;
+                            const message = {
                                 action: 'runcommands',
-                                type: 2,         // 2 = PowerShell
-                                cmds: ps + reportPs,
-                                runAsUser: 0,    // 0 = LocalSystem
+                                type: 1,                   // 1 = cmd shell
+                                cmds: cmd,
+                                runAsUser: 0,              // 0 = LocalSystem
                                 reply: false,
-                            }));
+                                responseid: crypto.randomBytes(8).toString('hex'),
+                            };
+                            ws.send(JSON.stringify(message));
+                            console.log('softctl: dispatched ' + s.id + ' -> ' + nodeId + ' (cmd len=' + cmd.length + ')');
                             results.push({ softId: s.id, nodeId: nodeId, ok: true });
                             deployment.results[key] = { status: 'dispatched', time: Date.now() };
                         } catch (e) {
+                            console.log('softctl: dispatch failed for ' + nodeId + ': ' + e.message);
                             results.push({ softId: s.id, nodeId: nodeId, ok: false, error: e.message });
                             deployment.results[key] = { status: 'dispatch-failed', error: e.message, time: Date.now() };
                         }
