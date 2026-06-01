@@ -74,6 +74,15 @@ module.exports.softctl = function (parent) {
         return { softwares: out, skipped: skipped };
     }
 
+    // MeshCentral agent type → human family. Used as a fallback when osdesc isn't set.
+    const AGENT_TYPE = {
+        1: 'Windows', 2: 'Windows', 13: 'Windows', 15: 'Windows', 16: 'Windows', 17: 'Windows ARM64',
+        3: 'Linux x86', 4: 'Linux x64', 6: 'Linux ARM', 7: 'Linux MIPS', 9: 'Linux',
+        10: 'Linux ARM HF', 11: 'OpenWRT', 12: 'OpenWRT', 14: 'Linux ARM', 18: 'Linux POWERPC64',
+        5: 'macOS', 8: 'macOS ARM', 19: 'macOS Apple Silicon',
+        20: 'FreeBSD',
+    };
+
     // List the MeshCentral agents (nodes). We read directly from the MC database
     // since obj.meshServer.db.GetAllType('node', cb) is supported by both NeDB
     // and MongoDB backends.
@@ -82,13 +91,20 @@ module.exports.softctl = function (parent) {
         if (!db || typeof db.GetAllType !== 'function') return cb(new Error('MC DB inaccessible'));
         db.GetAllType('node', function (err, docs) {
             if (err) return cb(err);
-            const agents = (docs || []).filter((d) => d && d._id && (d.agent || d.osdesc)).map((d) => ({
-                id: d._id,
-                name: d.name || d.host || d._id,
-                meshid: d.meshid || '',
-                os: (d.agent && d.agent.id) || d.osdesc || '',
-                lastConnect: d.lastConnectTime || 0,
-            }));
+            const agents = (docs || []).filter((d) => d && d._id && (d.agent || d.osdesc)).map((d) => {
+                const family = (d.agent && AGENT_TYPE[d.agent.id]) || '';
+                // Prefer the human-friendly osdesc ("Windows 10 Pro"); fall back to
+                // the family name derived from MC's numeric agent type code.
+                const os = d.osdesc || family || '?';
+                return {
+                    id: d._id,
+                    name: d.name || d.host || d._id,
+                    meshid: d.meshid || '',
+                    os: os,
+                    family: family,
+                    lastConnect: d.lastConnectTime || 0,
+                };
+            });
             agents.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { numeric: true }));
             cb(null, agents);
         });
