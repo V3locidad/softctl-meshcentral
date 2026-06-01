@@ -713,6 +713,44 @@ module.exports.softctl = function (parent) {
             return;
         }
 
+        if (action === 'debugWsAgent') {
+            // Diagnostic: examine ce que MeshCentral expose pour un node donné.
+            // Aide à comprendre pourquoi nos runcommands ne déclenchent rien.
+            const nodeId = String(req.query.nodeId || '');
+            const ws = obj.meshServer && obj.meshServer.webserver;
+            const wsagents = ws && ws.wsagents;
+            if (!wsagents) return sendJson(res, 200, { error: 'wsagents inaccessible' });
+            const keys = Object.keys(wsagents).slice(0, 20);
+            const target = wsagents[nodeId];
+            const detail = target ? {
+                hasSend: typeof target.send === 'function',
+                hasWs: !!target.ws,
+                hasInnerSend: target.ws && typeof target.ws.send === 'function',
+                readyState: target.readyState,
+                dbNodeKey: target.dbNodeKey,
+                nodeid: target.nodeid,
+                authenticated: target.authenticated,
+                ctorName: target.constructor && target.constructor.name,
+                keys: Object.keys(target).slice(0, 30),
+            } : 'not in wsagents';
+            // Liste aussi les méthodes côté meshServer qui ressemblent à un dispatch.
+            const meshServerMethods = obj.meshServer ? Object.getOwnPropertyNames(obj.meshServer)
+                .filter((k) => /send|command|message|dispatch/i.test(k))
+                .slice(0, 30) : [];
+            const webserverMethods = ws ? Object.getOwnPropertyNames(ws)
+                .filter((k) => /send|command|message|dispatch/i.test(k))
+                .slice(0, 30) : [];
+            sendJson(res, 200, {
+                wsAgentCount: Object.keys(wsagents).length,
+                sampleKeys: keys,
+                requestedNode: nodeId,
+                requestedNodeDetail: detail,
+                meshServerMethods: meshServerMethods,
+                webserverMethods: webserverMethods,
+            });
+            return;
+        }
+
         if (action === 'history') {
             // Liste les 50 derniers déploiements (triés par date desc).
             const list = Object.values(deployments)
