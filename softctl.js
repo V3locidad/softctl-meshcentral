@@ -496,12 +496,32 @@ module.exports.softctl = function (parent) {
                 // Crée un déploiement et garde-trace du contexte (qui, quoi, où).
                 const deploymentId = crypto.randomBytes(8).toString('hex');
                 const userName = (user && (user.name || user._id)) || 'unknown';
+                // Récupère le nom de chaque agent pour qu'on puisse afficher des
+                // hostnames lisibles dans l'historique au lieu de "node//abc…".
+                const nodeNames = {};
+                if (obj.meshServer && obj.meshServer.db) {
+                    nodeIds.forEach((nid) => {
+                        try {
+                            obj.meshServer.db.Get(nid, function (err, docs) {
+                                if (!err && docs && docs[0]) {
+                                    nodeNames[nid] = docs[0].name || docs[0].host || nid;
+                                    const d = deployments[deploymentId];
+                                    if (d) {
+                                        const n = d.nodes.find((x) => x.id === nid);
+                                        if (n) n.name = nodeNames[nid];
+                                        saveHistory();
+                                    }
+                                }
+                            });
+                        } catch (_) {}
+                    });
+                }
                 const deployment = {
                     id: deploymentId,
                     timestamp: Date.now(),
                     user: userName,
                     softs: installable.map((s) => ({ id: s.id, name: s.name + (s.version ? ' ' + s.version : '') })),
-                    nodes: nodeIds.map((id) => ({ id: id })),
+                    nodes: nodeIds.map((id) => ({ id: id, name: nodeNames[id] || '' })),
                     results: {},  // clé = softId + '|' + nodeId
                 };
 
@@ -579,6 +599,17 @@ module.exports.softctl = function (parent) {
                             deployment.results[key] = { status: 'agent-offline', time: Date.now() };
                             return;
                         }
+                        // Garde-fou : on ne fait confiance qu'à ce que le WebSocket
+                        // déclare comme node cible. Si MC indexe mal wsagents et que
+                        // ws.dbNodeKey pointe ailleurs, on refuse plutôt que de
+                        // pousser un install sur le mauvais poste.
+                        const targetKey = ws.dbNodeKey || ws.nodeid || nodeId;
+                        if (targetKey !== nodeId) {
+                            console.log('softctl: REJET dispatch ' + nodeId + ' — wsagent.dbNodeKey=' + targetKey);
+                            results.push({ softId: s.id, nodeId: nodeId, ok: false, error: 'incohérence wsagent (ciblage refusé)' });
+                            deployment.results[key] = { status: 'dispatch-failed', error: 'wsagent ciblage incohérent', time: Date.now() };
+                            return;
+                        }
                         try {
                             ws.send(JSON.stringify({
                                 action: 'runcommands',
@@ -633,6 +664,26 @@ module.exports.softctl = function (parent) {
                 }
                 res.status(200).set('Content-Type', 'text/plain').send('ok');
             } catch (e) { res.status(500).send(e.message); }
+            return;
+        }
+
+        if (action === 'cancelDeployment') {
+            // On ne peut pas vraiment tuer une install Windows déjà lancée, mais on
+            // peut marquer toutes les entrées en attente comme annulées et arrêter
+            // le polling côté UI. Les installs déjà en cours iront à leur terme.
+            const id = String(req.query.id || '');
+            const d = deployments[id];
+            if (!d) return sendJson(res, 404, { error: 'introuvable' });
+            let n = 0;
+            Object.keys(d.results || {}).forEach((k) => {
+                const r = d.results[k];
+                if (r && r.status !== 'success' && r.status !== 'fail') {
+                    d.results[k] = { status: 'cancelled', time: Date.now() };
+                    n++;
+                }
+            });
+            saveHistory();
+            sendJson(res, 200, { ok: true, cancelled: n });
             return;
         }
 

@@ -92,6 +92,7 @@
 </div>
 
 <pre id="preview"></pre>
+<div id="deployResult" style="display:none;margin-top:10px;border:1px solid #ddd;border-radius:4px;padding:10px;max-height:340px;overflow:auto;flex:0 0 auto"></div>
 
 <script>
   function $(id) { return document.getElementById(id); }
@@ -344,28 +345,34 @@
     if (st === 'fail') return 'ÉCHEC';
     if (st === 'agent-offline') return 'agent off';
     if (st === 'dispatch-failed') return 'dispatch KO';
+    if (st === 'cancelled') return 'annulé';
     return 'en cours…';
   }
   function statusClass(st) {
     if (st === 'success') return 'success';
     if (st === 'fail') return 'fail';
-    if (st === 'agent-offline' || st === 'dispatch-failed') return 'offline';
+    if (st === 'agent-offline' || st === 'dispatch-failed' || st === 'cancelled') return 'offline';
     return 'pending';
   }
+  // Tâche de polling en cours : on stocke l'ID + le flag de cancel pour pouvoir
+  // l'arrêter quand l'utilisateur clique Annuler ou Fermer.
+  var currentFollow = { id: null, stop: false };
 
   function followDeployment(id) {
+    currentFollow = { id: id, stop: false };
     var startedAt = Date.now();
     var maxFollowMs = 10 * 60 * 1000;
     var tick = function () {
+      if (currentFollow.stop || currentFollow.id !== id) return;
       api('deployment', { id: id }).then(function (r) {
         if (r.error) { $('preview').textContent = 'Erreur: ' + r.error; return; }
         var d = r.deployment;
         if (!d) { $('preview').textContent = 'Déploiement introuvable.'; return; }
         renderDeployment(d);
         var allDone = Object.values(d.results || {}).every(function (x) {
-          return x.status === 'success' || x.status === 'fail' || x.status === 'agent-offline' || x.status === 'dispatch-failed';
+          return x.status === 'success' || x.status === 'fail' || x.status === 'agent-offline' || x.status === 'dispatch-failed' || x.status === 'cancelled';
         });
-        if (!allDone && (Date.now() - startedAt) < maxFollowMs) {
+        if (!allDone && (Date.now() - startedAt) < maxFollowMs && !currentFollow.stop) {
           setTimeout(tick, 5000);
         }
       });
@@ -374,35 +381,49 @@
   }
 
   function renderDeployment(d) {
-    var agentName = function (id) {
-      var a = agents.find(function (x) { return x.id === id; });
-      return a ? a.name : id.slice(0, 12);
+    var agentName = function (n) {
+      if (n.name) return n.name;
+      var a = agents.find(function (x) { return x.id === n.id; });
+      return a ? a.name : n.id.slice(0, 12);
     };
-    var html = '<div style="background:#f4f4f4;padding:8px;border-radius:4px;margin-bottom:8px"><b>Déploiement</b> ' + escapeHtml(d.id) + ' par ' + escapeHtml(d.user) + ' · ' + new Date(d.timestamp).toLocaleString() + '</div>';
+    var html = '<div style="background:#f4f4f4;padding:8px;border-radius:4px;margin-bottom:8px;display:flex;align-items:center;gap:8px">'
+             + '<div style="flex:1"><b>Déploiement</b> ' + escapeHtml(d.id) + ' par ' + escapeHtml(d.user) + ' · ' + escapeHtml(new Date(d.timestamp).toLocaleString()) + '</div>'
+             + '<button id="cancelDeployBtn">Annuler les en cours</button>'
+             + '<button id="closeDeployBtn">Fermer</button>'
+             + '</div>';
     html += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th style="text-align:left;padding:4px;border-bottom:1px solid #ddd">Poste</th>';
     (d.softs || []).forEach(function (s) {
       html += '<th style="text-align:left;padding:4px;border-bottom:1px solid #ddd">' + escapeHtml(s.name) + '</th>';
     });
     html += '</tr></thead><tbody>';
     (d.nodes || []).forEach(function (n) {
-      html += '<tr><td style="padding:4px;border-bottom:1px solid #f0f0f0">' + escapeHtml(agentName(n.id)) + '</td>';
+      html += '<tr><td style="padding:4px;border-bottom:1px solid #f0f0f0">' + escapeHtml(agentName(n)) + '</td>';
       (d.softs || []).forEach(function (s) {
         var key = s.id + '|' + n.id;
         var r = (d.results || {})[key] || { status: 'pending' };
         var ec = r.exitCode != null ? ' (' + r.exitCode + ')' : '';
-        html += '<td style="padding:4px;border-bottom:1px solid #f0f0f0"><span class="resCell ' + statusClass(r.status) + '">' + statusLabel(r.status) + ec + '</span></td>';
+        var title = r.error ? ' title="' + escapeHtml(r.error) + '"' : '';
+        html += '<td style="padding:4px;border-bottom:1px solid #f0f0f0"><span class="resCell ' + statusClass(r.status) + '"' + title + '>' + statusLabel(r.status) + ec + '</span></td>';
       });
       html += '</tr>';
     });
     html += '</tbody></table>';
-    $('preview').style.display = 'none';
-    var existing = document.getElementById('deployResult');
-    if (existing) existing.remove();
-    var div = document.createElement('div');
-    div.id = 'deployResult';
-    div.style.cssText = 'margin-top:10px;border:1px solid #ddd;border-radius:4px;padding:10px;max-height:340px;overflow:auto';
+    var div = $('deployResult');
+    div.style.display = '';
     div.innerHTML = html;
-    document.body.appendChild(div);
+    $('preview').style.display = 'none';
+    document.getElementById('cancelDeployBtn').onclick = function () {
+      if (!confirm('Marquer les installations en attente comme annulées ?\n\n(Note: les installs déjà en cours sur les postes vont à leur terme — Windows ne se laisse pas interrompre proprement à distance.)')) return;
+      api('cancelDeployment', { id: d.id }).then(function () {
+        currentFollow.stop = true;
+        followDeployment(d.id);  // un dernier tick pour rafraîchir
+      });
+    };
+    document.getElementById('closeDeployBtn').onclick = function () {
+      currentFollow.stop = true;
+      div.style.display = 'none';
+      div.innerHTML = '';
+    };
   }
 
   function openHistory() {
