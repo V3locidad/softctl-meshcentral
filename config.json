@@ -1,0 +1,14 @@
+{
+  "name": "softctl",
+  "shortName": "softctl",
+  "version": "0.0.1",
+  "author": "V3locidad",
+  "description": "Catalogue logiciels du Lycée + déploiement silencieux sur les postes via les agents MeshCentral. Phase 1: catalogue + sélection (dry-run).",
+  "hasAdminPanel": true,
+  "homepage": "https://github.com/V3locidad/softctl-meshcentral",
+  "changelogUrl": "https://raw.githubusercontent.com/V3locidad/softctl-meshcentral/main/changelog.md",
+  "configUrl": "https://raw.githubusercontent.com/V3locidad/softctl-meshcentral/main/config.json",
+  "downloadUrl": "https://github.com/V3locidad/softctl-meshcentral/archive/refs/heads/main.zip",
+  "repository": { "type": "git", "url": "https://github.com/V3locidad/softctl-meshcentral.git" },
+  "meshCentralCompat": ">=1.1.0"
+}

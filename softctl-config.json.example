@@ -1,0 +1,4 @@
+{
+  "_comment": "Renomme en softctl-config.json. softwareDir est le chemin local du dossier qui contient un sous-dossier par logiciel (chacun avec un metadata.json).",
+  "softwareDir": "/mnt/software/LOGICIELS"
+}

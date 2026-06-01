@@ -1,0 +1,243 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Software Control</title>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { font-family: Segoe UI, Arial, sans-serif; font-size: 13px; padding: 10px; color: #222; box-sizing: border-box; display: flex; flex-direction: column; }
+  h2 { margin: 0 0 10px 0; font-size: 16px; flex: 0 0 auto; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px; background: #f4f4f4; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 8px; flex: 0 0 auto; }
+  .bar input[type=text] { padding: 3px 6px; border: 1px solid #bbb; border-radius: 3px; font-size: 13px; }
+  button { padding: 5px 10px; border: 1px solid #888; background: #fff; border-radius: 3px; cursor: pointer; font-size: 13px; }
+  button.primary { background: #2c7be5; color: white; border-color: #2c7be5; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; background: #eee; font-size: 11px; margin-left: 6px; }
+  .pill.ok { background: #d4edda; color: #155724; }
+  .pill.bad { background: #f8d7da; color: #721c24; }
+  .cols { display: flex; gap: 10px; flex: 1 1 auto; min-height: 0; }
+  .col { flex: 1; border: 1px solid #ddd; border-radius: 4px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .col h3 { margin: 0; padding: 8px; background: #eee; border-bottom: 1px solid #ddd; font-size: 13px; flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+  .col h3 .spacer { flex: 1; }
+  .col .search { padding: 6px 8px; border-bottom: 1px solid #eee; flex: 0 0 auto; }
+  .col .search input { width: 100%; box-sizing: border-box; padding: 3px 6px; border: 1px solid #bbb; border-radius: 3px; font-size: 13px; }
+  .col .body { flex: 1 1 auto; overflow: auto; min-height: 0; }
+  .row { padding: 5px 10px; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .row:hover { background: #f8f8ff; }
+  .row.selected { background: #eef6ff; }
+  .row input[type=checkbox] { flex: 0 0 auto; }
+  .row .main { flex: 1; }
+  .row .main .title { font-weight: 500; }
+  .row .main .sub { color: #888; font-size: 11px; }
+  .empty { color: #aaa; font-style: italic; padding: 12px; }
+  #deployBar { margin-top: 10px; padding: 8px; background: #f4f4f4; border: 1px solid #ddd; border-radius: 4px; display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+  #deployBar .info { flex: 1; }
+  #preview { margin-top: 10px; background: #111; color: #ddd; font-family: Menlo, Consolas, monospace; font-size: 12px; padding: 8px; border-radius: 4px; max-height: 220px; overflow: auto; white-space: pre-wrap; display: none; flex: 0 0 auto; }
+  .badgeOs { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #e2e3e5; color: #383d41; margin-right: 4px; }
+  .badgeWarn { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #fff3cd; color: #856404; margin-left: 4px; }
+</style>
+</head>
+<body>
+
+<h2>Software Control <span id="cfgState" class="pill">checking…</span></h2>
+
+<div class="bar">
+  <strong>Phase 1 :</strong> catalogue + sélection (le déploiement réel arrive en phase 3).
+  <span style="flex:1"></span>
+  <button id="refreshBtn" class="primary">Rafraîchir</button>
+</div>
+
+<div class="cols">
+  <div class="col">
+    <h3>Logiciels <span id="softCount" class="pill">0</span><span class="spacer"></span><button id="selAllSoft">Tout</button><button id="selNoneSoft">Aucun</button></h3>
+    <div class="search"><input type="text" id="softFilter" placeholder="Filtrer (nom, éditeur, version…)"></div>
+    <div class="body" id="softList"><div class="empty">Chargement…</div></div>
+  </div>
+
+  <div class="col">
+    <h3>Postes <span id="agentCount" class="pill">0</span><span class="spacer"></span><button id="selAllAgent">Tout</button><button id="selNoneAgent">Aucun</button></h3>
+    <div class="search"><input type="text" id="agentFilter" placeholder="Filtrer (nom poste, OS…)"></div>
+    <div class="body" id="agentList"><div class="empty">Chargement…</div></div>
+  </div>
+</div>
+
+<div id="deployBar">
+  <div class="info">
+    <span id="selSummary">0 logiciel sélectionné · 0 poste sélectionné</span>
+  </div>
+  <button id="deployBtn" class="primary" disabled>Aperçu déploiement</button>
+</div>
+
+<pre id="preview"></pre>
+
+<script>
+  function $(id) { return document.getElementById(id); }
+  function api(action, params, body) {
+    var qs = 'action=' + encodeURIComponent(action);
+    if (params) Object.keys(params).forEach(function (k) {
+      qs += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
+    });
+    var opts = { credentials: 'include' };
+    if (body) {
+      opts.method = 'POST';
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify(body);
+    }
+    return fetch('/pluginadmin.ashx?pin=softctl&' + qs, opts).then(function (r) { return r.json(); });
+  }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+    });
+  }
+  function humanSize(n) {
+    if (!n) return '';
+    if (n < 1024) return n + ' o';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' Ko';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' Mo';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' Go';
+  }
+
+  var softwares = [];
+  var agents = [];
+  var softSel = {};   // id -> true
+  var agentSel = {};  // id -> true
+
+  function renderSoft() {
+    var q = ($('softFilter').value || '').toLowerCase().trim();
+    var rows = softwares.filter(function (s) {
+      if (!q) return true;
+      return [s.name, s.vendor, s.version, s.installer].some(function (v) { return (v || '').toLowerCase().indexOf(q) !== -1; });
+    });
+    $('softCount').textContent = softwares.length;
+    if (!rows.length) { $('softList').innerHTML = '<div class="empty">Aucun logiciel.</div>'; return; }
+    $('softList').innerHTML = rows.map(function (s) {
+      var checked = softSel[s.id] ? ' checked' : '';
+      var sel = softSel[s.id] ? ' selected' : '';
+      var warn = !s.installerOk ? '<span class="badgeWarn" title="Installeur introuvable dans le dossier">installeur manquant</span>'
+               : !s.silentArgs ? '<span class="badgeWarn" title="silentArgs non défini — installation interactive">non-silencieux</span>'
+               : '';
+      return '<div class="row' + sel + '" data-id="' + escapeHtml(s.id) + '">'
+           +   '<input type="checkbox" class="chk"' + checked + '>'
+           +   '<div class="main">'
+           +     '<div class="title">' + escapeHtml(s.name) + (s.version ? ' <span style="color:#888;font-weight:normal">' + escapeHtml(s.version) + '</span>' : '') + warn + '</div>'
+           +     '<div class="sub">'
+           +       (s.vendor ? escapeHtml(s.vendor) + ' · ' : '')
+           +       (s.installer ? escapeHtml(s.installer) + ' · ' : '')
+           +       humanSize(s.size)
+           +       (s.silentArgs ? ' · args: <code>' + escapeHtml(s.silentArgs) + '</code>' : '')
+           +     '</div>'
+           +   '</div>'
+           + '</div>';
+    }).join('');
+    bindRowToggle('softList', softSel, renderSoft);
+  }
+
+  function renderAgents() {
+    var q = ($('agentFilter').value || '').toLowerCase().trim();
+    var rows = agents.filter(function (a) {
+      if (!q) return true;
+      return [a.name, a.os].some(function (v) { return (v || '').toLowerCase().indexOf(q) !== -1; });
+    });
+    $('agentCount').textContent = agents.length;
+    if (!rows.length) { $('agentList').innerHTML = '<div class="empty">Aucun poste.</div>'; return; }
+    $('agentList').innerHTML = rows.map(function (a) {
+      var checked = agentSel[a.id] ? ' checked' : '';
+      var sel = agentSel[a.id] ? ' selected' : '';
+      return '<div class="row' + sel + '" data-id="' + escapeHtml(a.id) + '">'
+           +   '<input type="checkbox" class="chk"' + checked + '>'
+           +   '<div class="main">'
+           +     '<div class="title">' + escapeHtml(a.name) + '</div>'
+           +     '<div class="sub"><span class="badgeOs">' + escapeHtml(a.os || '?') + '</span></div>'
+           +   '</div>'
+           + '</div>';
+    }).join('');
+    bindRowToggle('agentList', agentSel, renderAgents);
+  }
+
+  function bindRowToggle(containerId, selStore, rerender) {
+    [].slice.call(document.querySelectorAll('#' + containerId + ' .row')).forEach(function (row) {
+      row.onclick = function (ev) {
+        // Ignore clicks on the checkbox itself — its native onchange will fire.
+        if (ev.target && ev.target.classList && ev.target.classList.contains('chk')) return;
+        var id = row.getAttribute('data-id');
+        if (selStore[id]) delete selStore[id]; else selStore[id] = true;
+        rerender();
+        updateSummary();
+      };
+    });
+    [].slice.call(document.querySelectorAll('#' + containerId + ' .chk')).forEach(function (chk) {
+      chk.onchange = function () {
+        var id = chk.parentNode.getAttribute('data-id');
+        if (chk.checked) selStore[id] = true; else delete selStore[id];
+        rerender();
+        updateSummary();
+      };
+    });
+  }
+
+  function updateSummary() {
+    var ns = Object.keys(softSel).length, na = Object.keys(agentSel).length;
+    $('selSummary').textContent = ns + ' logiciel' + (ns > 1 ? 's' : '') + ' sélectionné' + (ns > 1 ? 's' : '')
+                                + ' · ' + na + ' poste' + (na > 1 ? 's' : '') + ' sélectionné' + (na > 1 ? 's' : '');
+    $('deployBtn').disabled = !(ns && na);
+  }
+
+  function load() {
+    $('softList').innerHTML = '<div class="empty">Chargement…</div>';
+    $('agentList').innerHTML = '<div class="empty">Chargement…</div>';
+    api('catalog').then(function (r) {
+      if (r.error) {
+        $('cfgState').textContent = 'Erreur: ' + r.error;
+        $('cfgState').className = 'pill bad';
+        $('softList').innerHTML = '<div class="empty" style="color:#721c24">' + escapeHtml(r.error) + '</div>';
+        return;
+      }
+      softwares = r.softwares || [];
+      $('cfgState').textContent = softwares.length + ' logiciels, ' + (r.skipped || []).length + ' ignorés';
+      $('cfgState').className = 'pill ok';
+      renderSoft();
+    });
+    api('agents').then(function (r) {
+      if (r.error) {
+        $('agentList').innerHTML = '<div class="empty" style="color:#721c24">' + escapeHtml(r.error) + '</div>';
+        return;
+      }
+      agents = r.agents || [];
+      renderAgents();
+    });
+  }
+
+  $('softFilter').oninput = renderSoft;
+  $('agentFilter').oninput = renderAgents;
+  $('refreshBtn').onclick = load;
+  $('selAllSoft').onclick = function () { softwares.forEach(function (s) { softSel[s.id] = true; }); renderSoft(); updateSummary(); };
+  $('selNoneSoft').onclick = function () { softSel = {}; renderSoft(); updateSummary(); };
+  $('selAllAgent').onclick = function () { agents.forEach(function (a) { agentSel[a.id] = true; }); renderAgents(); updateSummary(); };
+  $('selNoneAgent').onclick = function () { agentSel = {}; renderAgents(); updateSummary(); };
+  $('deployBtn').onclick = function () {
+    var body = { softIds: Object.keys(softSel), nodeIds: Object.keys(agentSel) };
+    $('preview').style.display = '';
+    $('preview').textContent = 'Envoi du dry-run…';
+    api('dryRun', null, body).then(function (r) {
+      if (r.error) { $('preview').textContent = 'Erreur: ' + r.error; return; }
+      var lines = [];
+      lines.push('— APERÇU DÉPLOIEMENT —');
+      lines.push(r.note || '');
+      lines.push('');
+      (r.plan || []).forEach(function (p) {
+        lines.push('• ' + p.software);
+        lines.push('    fichier  : ' + p.installer);
+        lines.push('    silent   : ' + (p.silentArgs || '(non défini — installeur interactif)'));
+        lines.push('    postes   : ' + p.nodes);
+        lines.push('');
+      });
+      $('preview').textContent = lines.join('\n');
+    });
+  };
+
+  api('ping').then(function () {});
+  load();
+</script>
+</body>
+</html>
