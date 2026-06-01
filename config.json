@@ -1,7 +1,7 @@
 {
   "name": "softctl",
   "shortName": "softctl",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "author": "V3locidad",
   "description": "Catalogue logiciels du Lycée (ajout/édition/suppression depuis l'UI) + déploiement silencieux réel sur les postes via les agents MeshCentral. Phase 3: déploiement opérationnel.",
   "hasAdminPanel": true,

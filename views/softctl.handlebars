@@ -131,9 +131,11 @@
     $('softList').innerHTML = rows.map(function (s) {
       var checked = softSel[s.id] ? ' checked' : '';
       var sel = softSel[s.id] ? ' selected' : '';
+      var isZip = /\.zip$/i.test(s.installer || '');
       var warn = !s.installerOk ? '<span class="badgeWarn" title="Installeur introuvable dans le dossier">installeur manquant</span>'
+               : (isZip && !s.archiveInstaller) ? '<span class="badgeWarn" title="archiveInstaller non défini : chemin de l\'installeur dans le zip">chemin archive manquant</span>'
                : !s.silentArgs ? '<span class="badgeWarn" title="silentArgs non défini — installation interactive">non-silencieux</span>'
-               : '';
+               : (isZip ? '<span class="badgeWarn" style="background:#d1ecf1;color:#0c5460" title="Sera extrait avant install">archive</span>' : '');
       return '<div class="row' + sel + '" data-id="' + escapeHtml(s.id) + '">'
            +   '<input type="checkbox" class="chk"' + checked + '>'
            +   '<div class="main">'
@@ -335,8 +337,11 @@
       '<div class="field"><label>Arguments silencieux</label><input type="text" id="aSilent" placeholder="/S">',
       '  <div class="help">Ex : <code>/S</code> (NSIS), <code>/quiet /norestart</code> (MSI), <code>/qn</code>, <code>--silent</code>, …</div>',
       '</div>',
-      '<div class="field"><label>Installeur (.exe ou .msi) *</label><input type="file" id="aFile" accept=".exe,.msi">',
-      '  <div class="help">Le fichier sera copié sur le NAS dans un sous-dossier dédié.</div>',
+      '<div class="field"><label>Installeur (.exe / .msi / .zip) *</label><input type="file" id="aFile" accept=".exe,.msi,.zip">',
+      '  <div class="help">Le fichier sera copié sur le NAS. Si tu choisis un .zip, l\'archive sera extraite côté poste avant l\'install.</div>',
+      '</div>',
+      '<div class="field"><label>Chemin dans le .zip (si applicable)</label><input type="text" id="aArchive" placeholder="Anagene/setup.exe">',
+      '  <div class="help">Pour un installeur multi-fichiers livré en .zip : chemin relatif de l\'exécutable principal à l\'intérieur de l\'archive.</div>',
       '</div>',
       '<div class="actions">',
       '  <button id="aCancel">Annuler</button>',
@@ -358,6 +363,7 @@
         vendor: bg.querySelector('#aVendor').value.trim(),
         silentArgs: bg.querySelector('#aSilent').value.trim(),
         filename: file.name,
+        archiveInstaller: bg.querySelector('#aArchive').value.trim(),
       };
       var qsStr = 'action=addSoftware&' + Object.keys(qs).map(function (k) { return k + '=' + encodeURIComponent(qs[k]); }).join('&');
       var submit = bg.querySelector('#aSubmit');
@@ -390,7 +396,10 @@
       '<div class="field"><label>Fichier installeur (nom)</label><input type="text" id="eInstaller" value="' + escapeHtml(s.installer) + '">',
       '  <div class="help">Nom du fichier dans le dossier. Pour le remplacer par un nouveau binaire, utilise le champ ci-dessous.</div>',
       '</div>',
-      '<div class="field"><label>Remplacer le fichier .exe / .msi (optionnel)</label><input type="file" id="eFile" accept=".exe,.msi">',
+      '<div class="field"><label>Chemin dans le .zip (si applicable)</label><input type="text" id="eArchive" value="' + escapeHtml(s.archiveInstaller || '') + '" placeholder="Anagene/setup.exe">',
+      '  <div class="help">Uniquement pour les installeurs livrés en archive : chemin relatif de l\'exécutable principal à l\'intérieur du .zip.</div>',
+      '</div>',
+      '<div class="field"><label>Remplacer le fichier .exe / .msi / .zip (optionnel)</label><input type="file" id="eFile" accept=".exe,.msi,.zip">',
       '  <div class="help">Si tu choisis un fichier ici, il sera uploadé et remplacera l\'installeur actuel (l\'ancien fichier sera supprimé).</div>',
       '</div>',
       '<div class="actions">',
@@ -409,6 +418,7 @@
         version: bg.querySelector('#eVersion').value.trim(),
         vendor: bg.querySelector('#eVendor').value.trim(),
         silentArgs: bg.querySelector('#eSilent').value.trim(),
+        archiveInstaller: bg.querySelector('#eArchive').value.trim(),
       };
       // Le champ installer n'est patché que s'il n'y a pas de remplacement ET
       // qu'il a été modifié manuellement par l'utilisateur. Sinon c'est

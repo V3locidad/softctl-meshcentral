@@ -71,11 +71,11 @@ module.exports.softctl = function (parent) {
             try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); }
             catch (err) { skipped.push({ folder: e.name, reason: 'metadata.json invalide: ' + err.message }); continue; }
             // Resolve the installer: prefer the explicit field, else find the
-            // first .exe/.msi in the folder. Keep filename only (no leading path)
-            // so the UI doesn't leak the local mount path.
+            // first .exe/.msi/.zip in the folder. Keep filename only (no leading
+            // path) so the UI doesn't leak the local mount path.
             let installer = meta.installer || '';
             if (!installer) {
-                const files = fs.readdirSync(folder).filter((f) => /\.(exe|msi)$/i.test(f));
+                const files = fs.readdirSync(folder).filter((f) => /\.(exe|msi|zip)$/i.test(f));
                 if (files.length) installer = files[0];
             }
             const installerPath = installer ? path.join(folder, installer) : '';
@@ -91,6 +91,8 @@ module.exports.softctl = function (parent) {
                 installer: installer,
                 installerOk: installerOk,
                 size: size,
+                archive: meta.archive || '',
+                archiveInstaller: meta.archiveInstaller || '',
             });
         }
         out.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { numeric: true }));
@@ -196,7 +198,7 @@ module.exports.softctl = function (parent) {
                 const slug = slugify(req.query.slug || name);
                 if (!slug) return sendJson(res, 400, { error: 'slug invalide' });
                 const filename = String(req.query.filename || '').replace(/[\\/]/g, '_').trim();
-                if (!filename || !/\.(exe|msi)$/i.test(filename)) return sendJson(res, 400, { error: 'filename .exe ou .msi requis' });
+                if (!filename || !/\.(exe|msi|zip)$/i.test(filename)) return sendJson(res, 400, { error: 'filename .exe, .msi ou .zip requis' });
                 const folder = softwareFolder(cfg, slug);
                 if (fs.existsSync(folder)) return sendJson(res, 409, { error: 'un logiciel avec ce slug existe déjà: ' + slug });
                 fs.mkdirSync(folder, { recursive: true });
@@ -211,6 +213,10 @@ module.exports.softctl = function (parent) {
                         silentArgs: String(req.query.silentArgs || '').trim(),
                         installer: filename,
                     };
+                    // Pour les .zip on demande le chemin de l'installeur principal
+                    // à l'intérieur de l'archive (ex: "Anagene/setup.exe").
+                    const archiveInstaller = String(req.query.archiveInstaller || '').replace(/^[\\/]+/, '').trim();
+                    if (/\.zip$/i.test(filename) && archiveInstaller) meta.archiveInstaller = archiveInstaller;
                     fs.writeFileSync(path.join(folder, 'metadata.json'), JSON.stringify(meta, null, 2));
                     sendJson(res, 200, { ok: true, slug: slug });
                 });
@@ -235,7 +241,7 @@ module.exports.softctl = function (parent) {
                     const current = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
                     const patch = JSON.parse(body || '{}');
                     // Only allow whitelisted keys; ignore anything else.
-                    ['name', 'version', 'vendor', 'silentArgs', 'installer'].forEach((k) => {
+                    ['name', 'version', 'vendor', 'silentArgs', 'installer', 'archiveInstaller'].forEach((k) => {
                         if (patch[k] !== undefined) current[k] = String(patch[k]).trim();
                     });
                     fs.writeFileSync(metaPath, JSON.stringify(current, null, 2));
@@ -255,7 +261,7 @@ module.exports.softctl = function (parent) {
                 const metaPath = path.join(folder, 'metadata.json');
                 if (!fs.existsSync(metaPath)) return sendJson(res, 404, { error: 'logiciel introuvable' });
                 const filename = String(req.query.filename || '').replace(/[\\/]/g, '_').trim();
-                if (!filename || !/\.(exe|msi)$/i.test(filename)) return sendJson(res, 400, { error: 'filename .exe ou .msi requis' });
+                if (!filename || !/\.(exe|msi|zip)$/i.test(filename)) return sendJson(res, 400, { error: 'filename .exe, .msi ou .zip requis' });
                 const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
                 const oldInstaller = meta.installer || '';
                 const newPath = path.join(folder, filename);
@@ -353,21 +359,37 @@ module.exports.softctl = function (parent) {
                         "$url = '" + psEscape(url) + "'",
                         "$installer = '" + psEscape(s.installer) + "'",
                         "$silentArgs = '" + psEscape(s.silentArgs) + "'",
-                        "$tmpDir = Join-Path $env:TEMP 'softctl'",
+                        "$archiveInstaller = '" + psEscape(s.archiveInstaller || '') + "'",
+                        "$tmpDir = Join-Path $env:TEMP ('softctl_' + [System.Guid]::NewGuid().ToString('N'))",
                         "New-Item -Path $tmpDir -ItemType Directory -Force | Out-Null",
-                        "$tmp = Join-Path $tmpDir $installer",
-                        "Write-Output \"softctl: download $url\"",
-                        "Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing",
+                        "$download = Join-Path $tmpDir $installer",
+                        "Write-Output \"softctl: download $url -> $download\"",
+                        "Invoke-WebRequest -Uri $url -OutFile $download -UseBasicParsing",
                         "$ext = [System.IO.Path]::GetExtension($installer).ToLower()",
-                        "if ($ext -eq '.msi') {",
-                        "  $args = \"/i `\"$tmp`\" \" + $silentArgs",
-                        "  $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $args -PassThru -Wait",
+                        "if ($ext -eq '.zip') {",
+                        "  if (-not $archiveInstaller) { Write-Output 'softctl: ERROR archive sans archiveInstaller'; Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue; exit 2 }",
+                        "  $extractDir = Join-Path $tmpDir 'extract'",
+                        "  Write-Output \"softctl: extract -> $extractDir\"",
+                        "  Expand-Archive -Path $download -DestinationPath $extractDir -Force",
+                        "  $target = Join-Path $extractDir $archiveInstaller",
+                        "  if (-not (Test-Path $target)) { Write-Output \"softctl: ERROR installeur non trouvé dans l'archive: $archiveInstaller\"; Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue; exit 3 }",
+                        "  $tExt = [System.IO.Path]::GetExtension($target).ToLower()",
+                        "  if ($tExt -eq '.msi') {",
+                        "    $msiArgs = \"/i `\"$target`\" \" + $silentArgs",
+                        "    $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -PassThru -Wait",
+                        "  } else {",
+                        "    if ($silentArgs) { $proc = Start-Process -FilePath $target -ArgumentList $silentArgs -PassThru -Wait -WorkingDirectory (Split-Path $target) }",
+                        "    else { $proc = Start-Process -FilePath $target -PassThru -Wait -WorkingDirectory (Split-Path $target) }",
+                        "  }",
+                        "} elseif ($ext -eq '.msi') {",
+                        "  $msiArgs = \"/i `\"$download`\" \" + $silentArgs",
+                        "  $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -PassThru -Wait",
                         "} else {",
-                        "  if ($silentArgs) { $proc = Start-Process -FilePath $tmp -ArgumentList $silentArgs -PassThru -Wait }",
-                        "  else { $proc = Start-Process -FilePath $tmp -PassThru -Wait }",
+                        "  if ($silentArgs) { $proc = Start-Process -FilePath $download -ArgumentList $silentArgs -PassThru -Wait }",
+                        "  else { $proc = Start-Process -FilePath $download -PassThru -Wait }",
                         "}",
                         "Write-Output \"softctl: exit code $($proc.ExitCode)\"",
-                        "Remove-Item $tmp -Force -ErrorAction SilentlyContinue",
+                        "Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue",
                     ].join('\r\n');
 
                     nodeIds.forEach((nodeId) => {
