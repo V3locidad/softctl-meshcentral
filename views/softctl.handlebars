@@ -354,7 +354,8 @@
       err.style.display = 'none';
       if (!name) { err.textContent = 'Nom requis.'; err.style.display = 'block'; return; }
       if (!file) { err.textContent = 'Installeur requis.'; err.style.display = 'block'; return; }
-      var qs = {
+      var params = {
+        mode: 'add',
         name: name,
         version: bg.querySelector('#aVersion').value.trim(),
         vendor: bg.querySelector('#aVendor').value.trim(),
@@ -362,18 +363,18 @@
         filename: file.name,
         archiveInstaller: bg.querySelector('#aArchive').value.trim(),
       };
-      var qsStr = 'action=addSoftware&' + Object.keys(qs).map(function (k) { return k + '=' + encodeURIComponent(qs[k]); }).join('&');
       var submit = bg.querySelector('#aSubmit');
-      submit.disabled = true; submit.textContent = 'Envoi en cours…';
-      // PUT (et pas POST) pour contourner la protection CSRF/POST de MC sur
-      // pluginadmin.ashx. Le body brut continue de streamer le fichier.
-      fetch('/pluginadmin.ashx?pin=softctl&' + qsStr, {
-        method: 'PUT',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: file,
-      }).then(function (r) { return r.json(); }).then(function (r) {
-        if (r.error) { err.textContent = r.error; err.style.display = 'block'; submit.disabled = false; submit.textContent = 'Ajouter'; return; }
+      submit.disabled = true; submit.textContent = 'Préparation…';
+      // Étape 1 : récupère un token + URL via GET (pluginadmin).
+      api('requestUploadToken', params).then(function (r1) {
+        if (r1.error) { err.textContent = r1.error; err.style.display = 'block'; submit.disabled = false; submit.textContent = 'Ajouter'; return null; }
+        submit.textContent = 'Upload…';
+        // Étape 2 : PUT le fichier sur l'endpoint custom (hors pluginadmin).
+        return fetch(r1.url, { method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/octet-stream' }, body: file })
+          .then(function (r) { return r.json(); });
+      }).then(function (r2) {
+        if (!r2) return;
+        if (r2.error) { err.textContent = r2.error; err.style.display = 'block'; submit.disabled = false; submit.textContent = 'Ajouter'; return; }
         closeModal(bg); load();
       });
     };
@@ -425,11 +426,14 @@
       if (!file && newInstaller !== s.installer) patch.installer = newInstaller;
 
       // Étape 1 (optionnelle): upload du binaire de remplacement.
-      submit.disabled = true; submit.textContent = file ? 'Upload…' : 'Enregistrement…';
+      submit.disabled = true; submit.textContent = file ? 'Préparation…' : 'Enregistrement…';
       var step1 = file
-        ? fetch('/pluginadmin.ashx?pin=softctl&action=replaceInstaller&slug=' + encodeURIComponent(slug) + '&filename=' + encodeURIComponent(file.name),
-                { method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/octet-stream' }, body: file })
-            .then(function (r) { return r.json(); })
+        ? api('requestUploadToken', { mode: 'replace', slug: slug, filename: file.name }).then(function (rt) {
+            if (rt.error) return rt;
+            submit.textContent = 'Upload…';
+            return fetch(rt.url, { method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/octet-stream' }, body: file })
+              .then(function (r) { return r.json(); });
+          })
         : Promise.resolve({ ok: true });
 
       step1.then(function (r1) {

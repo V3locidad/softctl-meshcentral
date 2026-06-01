@@ -17,6 +17,7 @@ const crypto = require('crypto');
 // installer, and expires after TOKEN_TTL_MS. After download (or timeout) the
 // token is forgotten and any second attempt 403s.
 const downloadTokens = {};
+const uploadTokens = {};
 const TOKEN_TTL_MS = 30 * 60 * 1000;
 
 function newDownloadToken(slug) {
@@ -152,7 +153,71 @@ module.exports.softctl = function (parent) {
         });
     }
 
-    obj.server_startup = function () {};
+    // Enregistre un endpoint dédié pour les uploads, en dehors de pluginadmin.ashx
+    // dont MC refuse les POST/PUT (CSRF-like). On utilise un token d'usage unique
+    // pour gérer l'auth nous-mêmes — le token n'est délivré qu'à un user
+    // authentifié via la route GET pluginadmin.
+    obj.server_startup = function () {
+        const ws = obj.meshServer && obj.meshServer.webserver;
+        const app = ws && ws.app;
+        if (!app || typeof app.put !== 'function') {
+            console.log('softctl: webserver.app inaccessible — uploads HTTP indisponibles');
+            return;
+        }
+        app.put('/softctl-upload/:token', (req, res) => {
+            try {
+                const token = String(req.params.token || '');
+                const entry = uploadTokens[token];
+                if (!entry || entry.expires < Date.now()) {
+                    return res.status(403).set('Content-Type', 'application/json').send(JSON.stringify({ error: 'token invalide ou expiré' }));
+                }
+                // Token à usage unique : on le brûle dès qu'on commence à écrire.
+                delete uploadTokens[token];
+
+                const cfg = loadCfg();
+                if (!cfg || !cfg.softwareDir) return res.status(500).set('Content-Type', 'application/json').send(JSON.stringify({ error: 'softwareDir non défini' }));
+                const folder = path.join(cfg.softwareDir, entry.slug);
+                if (entry.mode === 'add') {
+                    if (fs.existsSync(folder)) return res.status(409).set('Content-Type', 'application/json').send(JSON.stringify({ error: 'slug existe déjà' }));
+                    fs.mkdirSync(folder, { recursive: true });
+                } else if (!fs.existsSync(folder)) {
+                    return res.status(404).set('Content-Type', 'application/json').send(JSON.stringify({ error: 'logiciel introuvable' }));
+                }
+                const installerPath = path.join(folder, entry.filename);
+                const ws2 = fs.createWriteStream(installerPath);
+                req.pipe(ws2);
+                ws2.on('finish', () => {
+                    // Écrit la metadata (add) ou met à jour installer (replace).
+                    const metaPath = path.join(folder, 'metadata.json');
+                    if (entry.mode === 'add') {
+                        const meta = {
+                            name: entry.name,
+                            version: entry.version || '',
+                            vendor: entry.vendor || '',
+                            silentArgs: entry.silentArgs || '',
+                            installer: entry.filename,
+                        };
+                        if (/\.zip$/i.test(entry.filename) && entry.archiveInstaller) meta.archiveInstaller = entry.archiveInstaller;
+                        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+                    } else if (entry.mode === 'replace' && fs.existsSync(metaPath)) {
+                        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+                        // Si le nom du fichier change, on vire l'ancien.
+                        if (meta.installer && meta.installer !== entry.filename) {
+                            const oldPath = path.join(folder, meta.installer);
+                            try { if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath); } catch (_) {}
+                        }
+                        meta.installer = entry.filename;
+                        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+                    }
+                    res.set('Content-Type', 'application/json').send(JSON.stringify({ ok: true, slug: entry.slug, installer: entry.filename }));
+                });
+                ws2.on('error', (e) => res.status(500).set('Content-Type', 'application/json').send(JSON.stringify({ error: 'write failed: ' + e.message })));
+            } catch (e) {
+                res.status(500).set('Content-Type', 'application/json').send(JSON.stringify({ error: e.message }));
+            }
+        });
+        console.log('softctl: PUT /softctl-upload/:token enregistré');
+    };
 
     obj.handleAdminReq = function (req, res, user) {
         const action = (req.query && req.query.action) || '';
@@ -195,6 +260,39 @@ module.exports.softctl = function (parent) {
             if (!cfg || !cfg.softwareDir) throw new Error('softwareDir non défini');
             if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(slug)) throw new Error('slug invalide');
             return path.join(cfg.softwareDir, slug);
+        }
+
+        if (action === 'requestUploadToken') {
+            // GET. Renvoie un token + URL à utiliser pour PUT le fichier. Tous les
+            // champs metadata sont stockés dans le token pour ne pas avoir à les
+            // re-transmettre dans la requête PUT (dont MC ne touche pas les query
+            // params).
+            try {
+                const mode = String(req.query.mode || '').trim();  // 'add' | 'replace'
+                if (mode !== 'add' && mode !== 'replace') return sendJson(res, 400, { error: 'mode invalide' });
+                const cfg = loadCfg();
+                if (!cfg || !cfg.softwareDir) return sendJson(res, 500, { error: 'softwareDir non défini' });
+                const name = String(req.query.name || '').trim();
+                const slug = slugify(req.query.slug || name);
+                if (!slug || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(slug)) return sendJson(res, 400, { error: 'slug invalide' });
+                const filename = String(req.query.filename || '').replace(/[\\/]/g, '_').trim();
+                if (!filename || !/\.(exe|msi|zip)$/i.test(filename)) return sendJson(res, 400, { error: 'filename .exe, .msi ou .zip requis' });
+                if (mode === 'add' && !name) return sendJson(res, 400, { error: 'name requis pour add' });
+                const token = crypto.randomBytes(24).toString('hex');
+                uploadTokens[token] = {
+                    expires: Date.now() + TOKEN_TTL_MS,
+                    mode: mode,
+                    slug: slug,
+                    filename: filename,
+                    name: name,
+                    version: String(req.query.version || '').trim(),
+                    vendor: String(req.query.vendor || '').trim(),
+                    silentArgs: String(req.query.silentArgs || '').trim(),
+                    archiveInstaller: String(req.query.archiveInstaller || '').replace(/^[\\/]+/, '').trim(),
+                };
+                sendJson(res, 200, { token: token, url: '/softctl-upload/' + token, slug: slug });
+            } catch (e) { sendJson(res, 500, { error: e.message }); }
+            return;
         }
 
         if (action === 'addSoftware') {
