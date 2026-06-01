@@ -10,6 +10,29 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+
+// Token store for installer downloads. The agent fetches /download?token=...
+// without a session cookie, so each token is single-use, scoped to one
+// installer, and expires after TOKEN_TTL_MS. After download (or timeout) the
+// token is forgotten and any second attempt 403s.
+const downloadTokens = {};
+const TOKEN_TTL_MS = 30 * 60 * 1000;
+
+function newDownloadToken(slug) {
+    const t = crypto.randomBytes(24).toString('hex');
+    downloadTokens[t] = { slug: slug, expires: Date.now() + TOKEN_TTL_MS };
+    return t;
+}
+
+function consumeDownloadToken(t) {
+    const e = downloadTokens[t];
+    if (!e) return null;
+    if (e.expires < Date.now()) { delete downloadTokens[t]; return null; }
+    // Single-shot: remove after first read so a leaked URL can't be replayed.
+    delete downloadTokens[t];
+    return e;
+}
 
 module.exports.softctl = function (parent) {
     const obj = {};
@@ -262,6 +285,122 @@ module.exports.softctl = function (parent) {
                 fs.rmSync(folder, { recursive: true, force: true });
                 sendJson(res, 200, { ok: true });
             } catch (e) { sendJson(res, 500, { error: e.message }); }
+            return;
+        }
+
+        if (action === 'download') {
+            // Sert l'installeur d'un soft donné. Le token vient de /deploy.
+            try {
+                const token = String(req.query.token || '');
+                const entry = consumeDownloadToken(token);
+                if (!entry) return res.status(403).set('Content-Type', 'text/plain').send('forbidden');
+                const cfg = loadCfg();
+                const folder = softwareFolder(cfg, entry.slug);
+                const metaPath = path.join(folder, 'metadata.json');
+                if (!fs.existsSync(metaPath)) return res.status(404).set('Content-Type', 'text/plain').send('soft introuvable');
+                const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+                if (!meta.installer) return res.status(404).set('Content-Type', 'text/plain').send('installeur non défini');
+                const installerPath = path.join(folder, meta.installer);
+                if (!fs.existsSync(installerPath)) return res.status(404).set('Content-Type', 'text/plain').send('fichier installeur manquant');
+                const stat = fs.statSync(installerPath);
+                res.set('Content-Type', 'application/octet-stream');
+                res.set('Content-Length', stat.size);
+                res.set('Content-Disposition', 'attachment; filename="' + meta.installer.replace(/"/g, '') + '"');
+                fs.createReadStream(installerPath).pipe(res);
+            } catch (e) { res.status(500).send(e.message); }
+            return;
+        }
+
+        if (action === 'deploy') {
+            // Vrai déploiement: pour chaque soft sélectionné on génère un token
+            // d'usage unique, on construit le script PS, et on l'envoie à chaque
+            // agent via son WebSocket MeshCentral. On retourne immédiatement le
+            // nombre de dispatches OK/KO (sans attendre le code retour de l'install).
+            let body = '';
+            req.on('data', (c) => { body += c.toString('utf8'); });
+            req.on('end', () => {
+                let payload;
+                try { payload = JSON.parse(body || '{}'); }
+                catch (e) { return sendJson(res, 400, { error: 'invalid JSON body' }); }
+                const softIds = Array.isArray(payload.softIds) ? payload.softIds : [];
+                const nodeIds = Array.isArray(payload.nodeIds) ? payload.nodeIds : [];
+                if (!softIds.length || !nodeIds.length) return sendJson(res, 400, { error: 'softIds et nodeIds requis' });
+                let cat;
+                try { cat = listCatalog(); }
+                catch (e) { return sendJson(res, 500, { error: e.message }); }
+                const picked = cat.softwares.filter((s) => softIds.indexOf(s.id) !== -1);
+                const installable = picked.filter((s) => s.installerOk);
+                if (!installable.length) return sendJson(res, 400, { error: 'aucun installeur valide dans la sélection' });
+
+                // Base URL pour l'agent. Préfère X-Forwarded-* si MC est derrière un proxy.
+                const proto = req.headers['x-forwarded-proto'] || (req.connection && req.connection.encrypted ? 'https' : 'http');
+                const host = req.headers['x-forwarded-host'] || req.headers.host;
+                const baseUrl = proto + '://' + host;
+
+                const wsagents = obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents;
+                if (!wsagents) return sendJson(res, 500, { error: 'MC wsagents inaccessible (API non standard)' });
+
+                const results = [];
+                installable.forEach((s) => {
+                    const token = newDownloadToken(s.id);
+                    const url = baseUrl + '/pluginadmin.ashx?pin=softctl&action=download&token=' + token;
+                    // Échappe pour insertion littérale dans la chaîne PS.
+                    const psEscape = (v) => String(v || '').replace(/'/g, "''");
+                    const ps = [
+                        "$ErrorActionPreference = 'Stop'",
+                        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12",
+                        "try { [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true } } catch {}",
+                        "$url = '" + psEscape(url) + "'",
+                        "$installer = '" + psEscape(s.installer) + "'",
+                        "$silentArgs = '" + psEscape(s.silentArgs) + "'",
+                        "$tmpDir = Join-Path $env:TEMP 'softctl'",
+                        "New-Item -Path $tmpDir -ItemType Directory -Force | Out-Null",
+                        "$tmp = Join-Path $tmpDir $installer",
+                        "Write-Output \"softctl: download $url\"",
+                        "Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing",
+                        "$ext = [System.IO.Path]::GetExtension($installer).ToLower()",
+                        "if ($ext -eq '.msi') {",
+                        "  $args = \"/i `\"$tmp`\" \" + $silentArgs",
+                        "  $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $args -PassThru -Wait",
+                        "} else {",
+                        "  if ($silentArgs) { $proc = Start-Process -FilePath $tmp -ArgumentList $silentArgs -PassThru -Wait }",
+                        "  else { $proc = Start-Process -FilePath $tmp -PassThru -Wait }",
+                        "}",
+                        "Write-Output \"softctl: exit code $($proc.ExitCode)\"",
+                        "Remove-Item $tmp -Force -ErrorAction SilentlyContinue",
+                    ].join('\r\n');
+
+                    nodeIds.forEach((nodeId) => {
+                        const ws = wsagents[nodeId];
+                        if (!ws || typeof ws.send !== 'function') {
+                            results.push({ softId: s.id, nodeId: nodeId, ok: false, error: 'agent déconnecté' });
+                            return;
+                        }
+                        try {
+                            ws.send(JSON.stringify({
+                                action: 'runcommands',
+                                type: 2,         // 2 = PowerShell
+                                cmds: ps,
+                                runAsUser: 0,    // 0 = LocalSystem
+                                reply: false,
+                            }));
+                            results.push({ softId: s.id, nodeId: nodeId, ok: true });
+                        } catch (e) {
+                            results.push({ softId: s.id, nodeId: nodeId, ok: false, error: e.message });
+                        }
+                    });
+                });
+
+                const ok = results.filter((r) => r.ok).length;
+                const fail = results.length - ok;
+                sendJson(res, 200, {
+                    dispatched: ok,
+                    failed: fail,
+                    total: results.length,
+                    note: ok + ' commande(s) envoyée(s), ' + fail + ' échec(s) au dispatch. Le résultat d\'installation côté poste apparaît dans l\'onglet "Console" du poste dans MeshCentral.',
+                    results: results.slice(0, 50),
+                });
+            });
             return;
         }
 

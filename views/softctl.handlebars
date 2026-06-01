@@ -81,7 +81,8 @@
   <div class="info">
     <span id="selSummary">0 logiciel sélectionné · 0 poste sélectionné</span>
   </div>
-  <button id="deployBtn" class="primary" disabled>Aperçu déploiement</button>
+  <button id="dryRunBtn" disabled>Aperçu</button>
+  <button id="deployBtn" class="primary" disabled>Déployer</button>
 </div>
 
 <pre id="preview"></pre>
@@ -223,6 +224,7 @@
     $('selSummary').textContent = ns + ' logiciel' + (ns > 1 ? 's' : '') + ' sélectionné' + (ns > 1 ? 's' : '')
                                 + ' · ' + na + ' poste' + (na > 1 ? 's' : '') + ' sélectionné' + (na > 1 ? 's' : '');
     $('deployBtn').disabled = !(ns && na);
+    $('dryRunBtn').disabled = !(ns && na);
   }
 
   function load() {
@@ -266,16 +268,13 @@
     agents.filter(function (a) { return a.meshid === mid; }).forEach(function (a) { agentSel[a.id] = true; });
     renderAgents(); updateSummary();
   };
-  $('deployBtn').onclick = function () {
+  $('dryRunBtn').onclick = function () {
     var body = { softIds: Object.keys(softSel), nodeIds: Object.keys(agentSel) };
     $('preview').style.display = '';
-    $('preview').textContent = 'Envoi du dry-run…';
+    $('preview').textContent = 'Aperçu…';
     api('dryRun', null, body).then(function (r) {
       if (r.error) { $('preview').textContent = 'Erreur: ' + r.error; return; }
-      var lines = [];
-      lines.push('— APERÇU DÉPLOIEMENT —');
-      lines.push(r.note || '');
-      lines.push('');
+      var lines = ['— APERÇU DÉPLOIEMENT —', r.note || '', ''];
       (r.plan || []).forEach(function (p) {
         lines.push('• ' + p.software);
         lines.push('    fichier  : ' + p.installer);
@@ -283,6 +282,33 @@
         lines.push('    postes   : ' + p.nodes);
         lines.push('');
       });
+      $('preview').textContent = lines.join('\n');
+    });
+  };
+
+  $('deployBtn').onclick = function () {
+    var ns = Object.keys(softSel).length, na = Object.keys(agentSel).length;
+    var msg = 'Déployer ' + ns + ' logiciel(s) sur ' + na + ' poste(s) ?\n\n'
+            + 'Les installeurs vont s\'exécuter en arrière-plan sur chaque poste avec leurs arguments silencieux.\n'
+            + 'Si silentArgs est vide, l\'installeur sera interactif et un utilisateur devra cliquer côté poste.';
+    if (!confirm(msg)) return;
+    var body = { softIds: Object.keys(softSel), nodeIds: Object.keys(agentSel) };
+    $('preview').style.display = '';
+    $('preview').textContent = 'Dispatch en cours…';
+    $('deployBtn').disabled = true; $('deployBtn').textContent = 'En cours…';
+    api('deploy', null, body).then(function (r) {
+      $('deployBtn').textContent = 'Déployer'; $('deployBtn').disabled = !(ns && na);
+      if (r.error) { $('preview').textContent = 'Erreur: ' + r.error; return; }
+      var lines = ['— DÉPLOIEMENT —',
+                   (r.dispatched || 0) + ' commande(s) envoyée(s), ' + (r.failed || 0) + ' échec(s) (' + (r.total || 0) + ' au total)',
+                   '', r.note || '', ''];
+      var fails = (r.results || []).filter(function (x) { return !x.ok; });
+      if (fails.length) {
+        lines.push('Postes en échec au dispatch :');
+        fails.forEach(function (f) { lines.push('  ✗ ' + f.nodeId.substring(0, 20) + '…  ' + (f.error || '?')); });
+        lines.push('');
+      }
+      lines.push('Pour suivre l\'installation côté poste, ouvre le poste dans MeshCentral → onglet Console.');
       $('preview').textContent = lines.join('\n');
     });
   };
