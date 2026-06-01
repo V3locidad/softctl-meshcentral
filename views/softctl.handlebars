@@ -35,6 +35,18 @@
   #preview { margin-top: 10px; background: #111; color: #ddd; font-family: Menlo, Consolas, monospace; font-size: 12px; padding: 8px; border-radius: 4px; max-height: 220px; overflow: auto; white-space: pre-wrap; display: none; flex: 0 0 auto; }
   .badgeOs { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #e2e3e5; color: #383d41; margin-right: 4px; }
   .badgeWarn { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #fff3cd; color: #856404; margin-left: 4px; }
+  .rowActions { display: flex; gap: 4px; flex: 0 0 auto; opacity: 0; transition: opacity .1s; }
+  .row:hover .rowActions { opacity: 1; }
+  .rowActions button { padding: 2px 6px; font-size: 11px; }
+  .modalBg { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .modal { background: #fff; border-radius: 6px; padding: 16px; min-width: 420px; max-width: 540px; max-height: 90vh; overflow: auto; }
+  .modal h3 { margin: 0 0 12px 0; font-size: 15px; }
+  .modal .field { margin-bottom: 10px; }
+  .modal .field label { display: block; font-size: 12px; color: #555; margin-bottom: 3px; }
+  .modal .field input[type=text], .modal .field input[type=file] { width: 100%; box-sizing: border-box; padding: 5px 7px; border: 1px solid #bbb; border-radius: 3px; font-size: 13px; }
+  .modal .field .help { color: #888; font-size: 11px; margin-top: 2px; }
+  .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+  .modal .err { color: #721c24; background: #f8d7da; padding: 6px 10px; border-radius: 3px; margin-bottom: 10px; display: none; }
 </style>
 </head>
 <body>
@@ -49,7 +61,7 @@
 
 <div class="cols">
   <div class="col">
-    <h3>Logiciels <span id="softCount" class="pill">0</span><span class="spacer"></span><button id="selAllSoft">Tout</button><button id="selNoneSoft">Aucun</button></h3>
+    <h3>Logiciels <span id="softCount" class="pill">0</span><span class="spacer"></span><button id="addSoftBtn" class="primary">+ Ajouter</button><button id="selAllSoft">Tout</button><button id="selNoneSoft">Aucun</button></h3>
     <div class="search"><input type="text" id="softFilter" placeholder="Filtrer (nom, éditeur, version…)"></div>
     <div class="body" id="softList"><div class="empty">Chargement…</div></div>
   </div>
@@ -128,9 +140,19 @@
            +       (s.silentArgs ? ' · args: <code>' + escapeHtml(s.silentArgs) + '</code>' : '')
            +     '</div>'
            +   '</div>'
+           +   '<div class="rowActions">'
+           +     '<button class="editBtn" data-id="' + escapeHtml(s.id) + '">Éditer</button>'
+           +     '<button class="delBtn" data-id="' + escapeHtml(s.id) + '">Suppr.</button>'
+           +   '</div>'
            + '</div>';
     }).join('');
     bindRowToggle('softList', softSel, renderSoft);
+    [].slice.call(document.querySelectorAll('#softList .editBtn')).forEach(function (b) {
+      b.onclick = function (ev) { ev.stopPropagation(); openEdit(b.getAttribute('data-id')); };
+    });
+    [].slice.call(document.querySelectorAll('#softList .delBtn')).forEach(function (b) {
+      b.onclick = function (ev) { ev.stopPropagation(); deleteSoftware(b.getAttribute('data-id')); };
+    });
   }
 
   function renderAgents() {
@@ -236,6 +258,118 @@
     });
   };
 
+  // ---- modal helpers ----
+  function showModal(html) {
+    var bg = document.createElement('div');
+    bg.className = 'modalBg';
+    bg.innerHTML = '<div class="modal">' + html + '</div>';
+    document.body.appendChild(bg);
+    bg.onclick = function (e) { if (e.target === bg) document.body.removeChild(bg); };
+    return bg;
+  }
+  function closeModal(bg) { if (bg && bg.parentNode) bg.parentNode.removeChild(bg); }
+
+  function openAdd() {
+    var bg = showModal([
+      '<h3>Ajouter un logiciel</h3>',
+      '<div class="err" id="addErr"></div>',
+      '<div class="field"><label>Nom *</label><input type="text" id="aName" placeholder="Notepad++"></div>',
+      '<div style="display:flex;gap:8px">',
+      '  <div class="field" style="flex:1"><label>Version</label><input type="text" id="aVersion" placeholder="8.6"></div>',
+      '  <div class="field" style="flex:1"><label>Éditeur</label><input type="text" id="aVendor" placeholder="Don Ho"></div>',
+      '</div>',
+      '<div class="field"><label>Arguments silencieux</label><input type="text" id="aSilent" placeholder="/S">',
+      '  <div class="help">Ex : <code>/S</code> (NSIS), <code>/quiet /norestart</code> (MSI), <code>/qn</code>, <code>--silent</code>, …</div>',
+      '</div>',
+      '<div class="field"><label>Installeur (.exe ou .msi) *</label><input type="file" id="aFile" accept=".exe,.msi">',
+      '  <div class="help">Le fichier sera copié sur le NAS dans un sous-dossier dédié.</div>',
+      '</div>',
+      '<div class="actions">',
+      '  <button id="aCancel">Annuler</button>',
+      '  <button id="aSubmit" class="primary">Ajouter</button>',
+      '</div>',
+    ].join(''));
+    var cancel = function () { closeModal(bg); };
+    bg.querySelector('#aCancel').onclick = cancel;
+    bg.querySelector('#aSubmit').onclick = function () {
+      var name = bg.querySelector('#aName').value.trim();
+      var file = bg.querySelector('#aFile').files[0];
+      var err = bg.querySelector('#addErr');
+      err.style.display = 'none';
+      if (!name) { err.textContent = 'Nom requis.'; err.style.display = 'block'; return; }
+      if (!file) { err.textContent = 'Installeur requis.'; err.style.display = 'block'; return; }
+      var qs = {
+        name: name,
+        version: bg.querySelector('#aVersion').value.trim(),
+        vendor: bg.querySelector('#aVendor').value.trim(),
+        silentArgs: bg.querySelector('#aSilent').value.trim(),
+        filename: file.name,
+      };
+      var qsStr = 'action=addSoftware&' + Object.keys(qs).map(function (k) { return k + '=' + encodeURIComponent(qs[k]); }).join('&');
+      var submit = bg.querySelector('#aSubmit');
+      submit.disabled = true; submit.textContent = 'Envoi en cours…';
+      // Stream the installer as the raw body — no multipart needed, scales to any size.
+      fetch('/pluginadmin.ashx?pin=softctl&' + qsStr, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      }).then(function (r) { return r.json(); }).then(function (r) {
+        if (r.error) { err.textContent = r.error; err.style.display = 'block'; submit.disabled = false; submit.textContent = 'Ajouter'; return; }
+        closeModal(bg); load();
+      });
+    };
+  }
+
+  function openEdit(slug) {
+    var s = softwares.find(function (x) { return x.id === slug; });
+    if (!s) return;
+    var bg = showModal([
+      '<h3>Éditer ' + escapeHtml(s.name) + '</h3>',
+      '<div class="err" id="eErr"></div>',
+      '<div class="field"><label>Nom *</label><input type="text" id="eName" value="' + escapeHtml(s.name) + '"></div>',
+      '<div style="display:flex;gap:8px">',
+      '  <div class="field" style="flex:1"><label>Version</label><input type="text" id="eVersion" value="' + escapeHtml(s.version) + '"></div>',
+      '  <div class="field" style="flex:1"><label>Éditeur</label><input type="text" id="eVendor" value="' + escapeHtml(s.vendor) + '"></div>',
+      '</div>',
+      '<div class="field"><label>Arguments silencieux</label><input type="text" id="eSilent" value="' + escapeHtml(s.silentArgs) + '"></div>',
+      '<div class="field"><label>Fichier installeur</label><input type="text" id="eInstaller" value="' + escapeHtml(s.installer) + '">',
+      '  <div class="help">Pour remplacer le fichier lui-même, supprime le logiciel et ré-ajoute-le.</div>',
+      '</div>',
+      '<div class="actions">',
+      '  <button id="eCancel">Annuler</button>',
+      '  <button id="eSubmit" class="primary">Enregistrer</button>',
+      '</div>',
+    ].join(''));
+    bg.querySelector('#eCancel').onclick = function () { closeModal(bg); };
+    bg.querySelector('#eSubmit').onclick = function () {
+      var patch = {
+        name: bg.querySelector('#eName').value.trim(),
+        version: bg.querySelector('#eVersion').value.trim(),
+        vendor: bg.querySelector('#eVendor').value.trim(),
+        silentArgs: bg.querySelector('#eSilent').value.trim(),
+        installer: bg.querySelector('#eInstaller').value.trim(),
+      };
+      api('updateSoftware', { slug: slug }, patch).then(function (r) {
+        var err = bg.querySelector('#eErr');
+        if (r.error) { err.textContent = r.error; err.style.display = 'block'; return; }
+        closeModal(bg); load();
+      });
+    };
+  }
+
+  function deleteSoftware(slug) {
+    var s = softwares.find(function (x) { return x.id === slug; });
+    if (!s) return;
+    if (!confirm('Supprimer définitivement ' + s.name + ' ?\n\nLe dossier ' + slug + ' et tous ses fichiers seront effacés sur le NAS.')) return;
+    api('deleteSoftware', { slug: slug }).then(function (r) {
+      if (r.error) { alert('Erreur: ' + r.error); return; }
+      delete softSel[slug];
+      load();
+    });
+  }
+
+  $('addSoftBtn').onclick = openAdd;
   api('ping').then(function () {});
   load();
 </script>

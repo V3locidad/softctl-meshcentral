@@ -123,6 +123,93 @@ module.exports.softctl = function (parent) {
             return;
         }
 
+        // ---- Phase 2: CRUD on the catalogue ----
+
+        // Compute a safe folder name from a free-text input. Restricted to
+        // [A-Za-z0-9_-]; everything else collapses to a single dash. Keeps the
+        // generated path predictable for downloads later.
+        function slugify(s) {
+            return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+                .replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 64);
+        }
+
+        function softwareFolder(cfg, slug) {
+            if (!cfg || !cfg.softwareDir) throw new Error('softwareDir non défini');
+            if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(slug)) throw new Error('slug invalide');
+            return path.join(cfg.softwareDir, slug);
+        }
+
+        if (action === 'addSoftware') {
+            // POST with the installer file as raw body, metadata in query params.
+            // Streaming avoids multipart parsing and supports installers of any size.
+            try {
+                const cfg = loadCfg();
+                const name = String(req.query.name || '').trim();
+                if (!name) return sendJson(res, 400, { error: 'name requis' });
+                const slug = slugify(req.query.slug || name);
+                if (!slug) return sendJson(res, 400, { error: 'slug invalide' });
+                const filename = String(req.query.filename || '').replace(/[\\/]/g, '_').trim();
+                if (!filename || !/\.(exe|msi)$/i.test(filename)) return sendJson(res, 400, { error: 'filename .exe ou .msi requis' });
+                const folder = softwareFolder(cfg, slug);
+                if (fs.existsSync(folder)) return sendJson(res, 409, { error: 'un logiciel avec ce slug existe déjà: ' + slug });
+                fs.mkdirSync(folder, { recursive: true });
+                const installerPath = path.join(folder, filename);
+                const ws = fs.createWriteStream(installerPath);
+                req.pipe(ws);
+                ws.on('finish', () => {
+                    const meta = {
+                        name: name,
+                        version: String(req.query.version || '').trim(),
+                        vendor: String(req.query.vendor || '').trim(),
+                        silentArgs: String(req.query.silentArgs || '').trim(),
+                        installer: filename,
+                    };
+                    fs.writeFileSync(path.join(folder, 'metadata.json'), JSON.stringify(meta, null, 2));
+                    sendJson(res, 200, { ok: true, slug: slug });
+                });
+                ws.on('error', (e) => sendJson(res, 500, { error: 'write failed: ' + e.message }));
+            } catch (e) { sendJson(res, 500, { error: e.message }); }
+            return;
+        }
+
+        if (action === 'updateSoftware') {
+            // POST JSON body with the fields to overwrite. The installer file is
+            // never touched here — replacing the binary requires a separate
+            // re-upload via addSoftware (delete + add).
+            let body = '';
+            req.on('data', (c) => { body += c.toString('utf8'); });
+            req.on('end', () => {
+                try {
+                    const cfg = loadCfg();
+                    const slug = String(req.query.slug || '').trim();
+                    const folder = softwareFolder(cfg, slug);
+                    const metaPath = path.join(folder, 'metadata.json');
+                    if (!fs.existsSync(metaPath)) return sendJson(res, 404, { error: 'logiciel introuvable' });
+                    const current = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+                    const patch = JSON.parse(body || '{}');
+                    // Only allow whitelisted keys; ignore anything else.
+                    ['name', 'version', 'vendor', 'silentArgs', 'installer'].forEach((k) => {
+                        if (patch[k] !== undefined) current[k] = String(patch[k]).trim();
+                    });
+                    fs.writeFileSync(metaPath, JSON.stringify(current, null, 2));
+                    sendJson(res, 200, { ok: true, software: current });
+                } catch (e) { sendJson(res, 500, { error: e.message }); }
+            });
+            return;
+        }
+
+        if (action === 'deleteSoftware') {
+            try {
+                const cfg = loadCfg();
+                const slug = String(req.query.slug || '').trim();
+                const folder = softwareFolder(cfg, slug);
+                if (!fs.existsSync(folder)) return sendJson(res, 404, { error: 'logiciel introuvable' });
+                fs.rmSync(folder, { recursive: true, force: true });
+                sendJson(res, 200, { ok: true });
+            } catch (e) { sendJson(res, 500, { error: e.message }); }
+            return;
+        }
+
         if (action === 'dryRun') {
             // For now we just echo what we'd push, so the UI can show a preview.
             // Phase 3 will replace this with the real agent dispatch.
