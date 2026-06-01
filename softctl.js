@@ -610,36 +610,45 @@ module.exports.softctl = function (parent) {
                             deployment.results[key] = { status: 'dispatch-failed', error: 'wsagent ciblage incohérent', time: Date.now() };
                             return;
                         }
-                        if (ws.readyState !== undefined && ws.readyState !== 1) {
-                            console.log('softctl: WS pas ouvert pour ' + nodeId + ' (readyState=' + ws.readyState + ')');
-                            results.push({ softId: s.id, nodeId: nodeId, ok: false, error: 'WS pas prêt' });
-                            deployment.results[key] = { status: 'dispatch-failed', error: 'WS pas prêt', time: Date.now() };
-                            return;
-                        }
-                        try {
-                            // Encode le script PS en UTF-16LE puis base64 (format
-                            // -EncodedCommand de PowerShell) et passe par cmd.exe.
-                            // Cette technique évite totalement les soucis de quoting
-                            // de l'agent MC qui transforme les chaînes envoyées.
-                            const psFull = ps + reportPs;
-                            const psB64 = Buffer.from(psFull, 'utf16le').toString('base64');
-                            const cmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + psB64;
-                            const message = {
-                                action: 'runcommands',
-                                type: 1,                   // 1 = cmd shell
-                                cmds: cmd,
-                                runAsUser: 0,              // 0 = LocalSystem
-                                reply: false,
-                                responseid: crypto.randomBytes(8).toString('hex'),
-                            };
-                            ws.send(JSON.stringify(message));
-                            console.log('softctl: dispatched ' + s.id + ' -> ' + nodeId + ' (cmd len=' + cmd.length + ')');
-                            results.push({ softId: s.id, nodeId: nodeId, ok: true });
-                            deployment.results[key] = { status: 'dispatched', time: Date.now() };
-                        } catch (e) {
-                            console.log('softctl: dispatch failed for ' + nodeId + ': ' + e.message);
-                            results.push({ softId: s.id, nodeId: nodeId, ok: false, error: e.message });
-                            deployment.results[key] = { status: 'dispatch-failed', error: e.message, time: Date.now() };
+                        // Encode le script PS en UTF-16LE puis base64. Évite tout
+                        // problème de quoting côté agent.
+                        const psFull = ps + reportPs;
+                        const psB64 = Buffer.from(psFull, 'utf16le').toString('base64');
+                        const cmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + psB64;
+                        const message = {
+                            action: 'runcommands',
+                            type: 1,                   // 1 = cmd shell
+                            cmds: cmd,
+                            runAsUser: 0,              // 0 = LocalSystem
+                            reply: false,
+                            responseid: crypto.randomBytes(8).toString('hex'),
+                        };
+                        // Stratégie multi-essais :
+                        //  1) ws.send(object) — certaines versions MC acceptent un objet
+                        //  2) ws.send(stringJSON) — la plus standard
+                        //  3) webserver.routeAgentCommand(...) — API interne MC
+                        const ws2 = obj.meshServer.webserver;
+                        let sent = false, via = '';
+                        const tryOne = (label, fn) => {
+                            if (sent) return;
+                            try { fn(); sent = true; via = label; }
+                            catch (e) { console.log('softctl: ' + label + ' KO: ' + e.message); }
+                        };
+                        tryOne('routeAgentCommand', () => {
+                            if (typeof ws2.routeAgentCommand !== 'function') throw new Error('méthode absente');
+                            const full = Object.assign({}, message, { nodeids: [nodeId] });
+                            ws2.routeAgentCommand(full, obj.meshServer.config && obj.meshServer.config.domains && obj.meshServer.config.domains[''], ws);
+                        });
+                        tryOne('ws.send(object)', () => { ws.send(message); });
+                        tryOne('ws.send(string)', () => { ws.send(JSON.stringify(message)); });
+                        if (sent) {
+                            console.log('softctl: dispatched ' + s.id + ' -> ' + nodeId + ' via ' + via + ' (cmd len=' + cmd.length + ')');
+                            results.push({ softId: s.id, nodeId: nodeId, ok: true, via: via });
+                            deployment.results[key] = { status: 'dispatched', via: via, time: Date.now() };
+                        } else {
+                            console.log('softctl: tous les chemins de dispatch ont échoué pour ' + nodeId);
+                            results.push({ softId: s.id, nodeId: nodeId, ok: false, error: 'aucun dispatch méthode disponible' });
+                            deployment.results[key] = { status: 'dispatch-failed', error: 'aucun chemin viable', time: Date.now() };
                         }
                     });
                 });
