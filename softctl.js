@@ -18,7 +18,29 @@ const crypto = require('crypto');
 // token is forgotten and any second attempt 403s.
 const downloadTokens = {};
 const uploadTokens = {};
+const reportTokens = {};      // token -> { deploymentId, softId, nodeId, expires }
 const TOKEN_TTL_MS = 30 * 60 * 1000;
+const REPORT_TTL_MS = 2 * 60 * 60 * 1000;  // 2 h, le temps qu'un gros install termine
+
+// Historique : Map en mémoire qu'on persiste sur disque à chaque mise à jour.
+// On garde les 200 derniers déploiements pour ne pas faire enfler le JSON.
+const deployments = {};       // id -> { id, timestamp, user, softs, nodes, results }
+const HISTORY_MAX = 200;
+const historyPath = () => path.join(__dirname, 'softctl-history.json');
+
+function loadHistory() {
+    try {
+        const raw = JSON.parse(fs.readFileSync(historyPath(), 'utf8'));
+        (raw.deployments || []).forEach((d) => { if (d && d.id) deployments[d.id] = d; });
+    } catch (e) {}
+}
+
+function saveHistory() {
+    try {
+        const list = Object.values(deployments).sort((a, b) => b.timestamp - a.timestamp).slice(0, HISTORY_MAX);
+        fs.writeFileSync(historyPath(), JSON.stringify({ deployments: list }, null, 2));
+    } catch (e) {}
+}
 
 function newDownloadToken(slug) {
     const t = crypto.randomBytes(24).toString('hex');
@@ -92,6 +114,11 @@ module.exports.softctl = function (parent) {
             const installerOk = installerPath && fs.existsSync(installerPath);
             let size = 0;
             try { if (installerOk) size = fs.statSync(installerPath).size; } catch (_) {}
+            // arch peut être surchargé dans metadata.json. Sinon on devine depuis
+            // le nom de fichier (et pour les .zip, depuis archiveInstaller). 'any'
+            // signifie "compatible partout" (typique pour les MSI fat ou les zips).
+            let arch = meta.arch || '';
+            if (!arch) arch = detectArch(installer) || (meta.archiveInstaller ? detectArch(meta.archiveInstaller) : '') || '';
             out.push({
                 id: e.name,
                 name: meta.name || e.name,
@@ -103,6 +130,7 @@ module.exports.softctl = function (parent) {
                 size: size,
                 archive: meta.archive || '',
                 archiveInstaller: meta.archiveInstaller || '',
+                arch: arch,
             });
         }
         out.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { numeric: true }));
@@ -117,6 +145,24 @@ module.exports.softctl = function (parent) {
         5: 'macOS', 8: 'macOS ARM', 19: 'macOS Apple Silicon',
         20: 'FreeBSD',
     };
+    // Architecture binaire de l'agent — utilisée pour matcher l'arch des installeurs.
+    const AGENT_ARCH = {
+        1: 'x86', 2: 'x86', 3: 'x86', 13: 'x86',
+        4: 'x64', 5: 'x64', 9: 'x64', 15: 'x64', 16: 'x64', 20: 'x64',
+        6: 'arm', 10: 'arm', 14: 'arm',
+        8: 'arm64', 17: 'arm64', 19: 'arm64',
+        7: 'mips', 18: 'ppc64', 11: '?', 12: '?',
+    };
+
+    // Devine l'arch depuis le nom du fichier installeur. Retourne '' si ambigu.
+    function detectArch(installer) {
+        if (!installer) return '';
+        const l = String(installer).toLowerCase();
+        if (/arm64|aarch64/.test(l)) return 'arm64';
+        if (/(^|[_.\- ])(x64|amd64|win64|64.?bit)([_.\- ]|$)/.test(l)) return 'x64';
+        if (/(^|[_.\- ])(x86|ia32|win32|32.?bit)([_.\- ]|$)/.test(l)) return 'x86';
+        return '';
+    }
 
     // List the MeshCentral agents (nodes) and the meshes ("salles") they belong to.
     // We fetch both types in one pass and resolve each node's mesh name so the UI
@@ -140,6 +186,7 @@ module.exports.softctl = function (parent) {
                         mesh: meshById[d.meshid] || '',
                         os: os,
                         family: family,
+                        arch: (d.agent && AGENT_ARCH[d.agent.id]) || '',
                         lastConnect: d.lastConnectTime || 0,
                     };
                 });
@@ -152,6 +199,9 @@ module.exports.softctl = function (parent) {
             });
         });
     }
+
+    // Restaure l'historique au démarrage (on persiste à chaque update).
+    loadHistory();
 
     // Enregistre un endpoint dédié pour les uploads, en dehors de pluginadmin.ashx
     // dont MC refuse les POST/PUT (CSRF-like). On utilise un token d'usage unique
@@ -343,7 +393,7 @@ module.exports.softctl = function (parent) {
                 if (!fs.existsSync(metaPath)) return sendJson(res, 404, { error: 'logiciel introuvable' });
                 const current = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
                 const patch = readJsonParam(req);
-                ['name', 'version', 'vendor', 'silentArgs', 'installer', 'archiveInstaller'].forEach((k) => {
+                ['name', 'version', 'vendor', 'silentArgs', 'installer', 'archiveInstaller', 'arch'].forEach((k) => {
                     if (patch[k] !== undefined) current[k] = String(patch[k]).trim();
                 });
                 fs.writeFileSync(metaPath, JSON.stringify(current, null, 2));
@@ -443,6 +493,18 @@ module.exports.softctl = function (parent) {
                 const wsagents = obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents;
                 if (!wsagents) return sendJson(res, 500, { error: 'MC wsagents inaccessible (API non standard)' });
 
+                // Crée un déploiement et garde-trace du contexte (qui, quoi, où).
+                const deploymentId = crypto.randomBytes(8).toString('hex');
+                const userName = (user && (user.name || user._id)) || 'unknown';
+                const deployment = {
+                    id: deploymentId,
+                    timestamp: Date.now(),
+                    user: userName,
+                    softs: installable.map((s) => ({ id: s.id, name: s.name + (s.version ? ' ' + s.version : '') })),
+                    nodes: nodeIds.map((id) => ({ id: id })),
+                    results: {},  // clé = softId + '|' + nodeId
+                };
+
                 const results = [];
                 installable.forEach((s) => {
                     const token = newDownloadToken(s.id);
@@ -490,36 +552,118 @@ module.exports.softctl = function (parent) {
                     ].join('\r\n');
 
                     nodeIds.forEach((nodeId) => {
+                        const key = s.id + '|' + nodeId;
+                        // Token de retour : le PowerShell s'en sert pour appeler
+                        // reportResult une fois l'install terminée.
+                        const reportToken = crypto.randomBytes(16).toString('hex');
+                        reportTokens[reportToken] = {
+                            deploymentId: deploymentId, softId: s.id, nodeId: nodeId,
+                            expires: Date.now() + REPORT_TTL_MS,
+                        };
+                        const reportUrl = baseUrl + '/pluginadmin.ashx?pin=softctl&action=reportResult&token=' + reportToken;
+                        // Petit suffixe PS qui poste le résultat. On l'append au
+                        // script principal et on s'arrange pour qu'il s'exécute
+                        // même si l'install échoue (try/finally).
+                        const reportPs = '\r\n' + [
+                            "$__reportBase = '" + psEscape(reportUrl) + "'",
+                            "$__exit = if ($proc) { $proc.ExitCode } else { -1 }",
+                            "try {",
+                            "  $u = $__reportBase + '&exit=' + $__exit",
+                            "  [void](Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 10)",
+                            "} catch {}",
+                        ].join('\r\n');
+
                         const ws = wsagents[nodeId];
                         if (!ws || typeof ws.send !== 'function') {
                             results.push({ softId: s.id, nodeId: nodeId, ok: false, error: 'agent déconnecté' });
+                            deployment.results[key] = { status: 'agent-offline', time: Date.now() };
                             return;
                         }
                         try {
                             ws.send(JSON.stringify({
                                 action: 'runcommands',
                                 type: 2,         // 2 = PowerShell
-                                cmds: ps,
+                                cmds: ps + reportPs,
                                 runAsUser: 0,    // 0 = LocalSystem
                                 reply: false,
                             }));
                             results.push({ softId: s.id, nodeId: nodeId, ok: true });
+                            deployment.results[key] = { status: 'dispatched', time: Date.now() };
                         } catch (e) {
                             results.push({ softId: s.id, nodeId: nodeId, ok: false, error: e.message });
+                            deployment.results[key] = { status: 'dispatch-failed', error: e.message, time: Date.now() };
                         }
                     });
                 });
 
                 const ok = results.filter((r) => r.ok).length;
                 const fail = results.length - ok;
+                deployments[deploymentId] = deployment;
+                saveHistory();
                 sendJson(res, 200, {
+                    deploymentId: deploymentId,
                     dispatched: ok,
                     failed: fail,
                     total: results.length,
-                    note: ok + ' commande(s) envoyée(s), ' + fail + ' échec(s) au dispatch. Le résultat d\'installation côté poste apparaît dans l\'onglet "Console" du poste dans MeshCentral.',
+                    note: ok + ' commande(s) envoyée(s), ' + fail + ' échec(s) au dispatch. Les résultats remonteront automatiquement.',
                     results: results.slice(0, 50),
                 });
             })();
+            return;
+        }
+
+        if (action === 'reportResult') {
+            // Appelé par le PowerShell de l'agent à la fin de l'install.
+            // GET pur, paramètres dans la query string. Retourne juste 'ok'.
+            try {
+                const token = String(req.query.token || '');
+                const entry = reportTokens[token];
+                if (!entry || entry.expires < Date.now()) return res.status(404).set('Content-Type', 'text/plain').send('token invalide');
+                delete reportTokens[token];
+                const exitCode = parseInt(req.query.exit, 10);
+                const dep = deployments[entry.deploymentId];
+                if (dep) {
+                    const key = entry.softId + '|' + entry.nodeId;
+                    dep.results[key] = {
+                        status: (exitCode === 0) ? 'success' : 'fail',
+                        exitCode: isNaN(exitCode) ? -1 : exitCode,
+                        time: Date.now(),
+                    };
+                    saveHistory();
+                }
+                res.status(200).set('Content-Type', 'text/plain').send('ok');
+            } catch (e) { res.status(500).send(e.message); }
+            return;
+        }
+
+        if (action === 'deployment') {
+            // Récupère l'état complet d'un déploiement (utilisé pour le polling UI).
+            const id = String(req.query.id || '');
+            const d = deployments[id];
+            if (!d) return sendJson(res, 404, { error: 'introuvable' });
+            sendJson(res, 200, { deployment: d });
+            return;
+        }
+
+        if (action === 'history') {
+            // Liste les 50 derniers déploiements (triés par date desc).
+            const list = Object.values(deployments)
+                .sort((a, b) => b.timestamp - a.timestamp).slice(0, 50)
+                .map((d) => {
+                    const counts = { dispatched: 0, success: 0, fail: 0, pending: 0, offline: 0 };
+                    Object.values(d.results || {}).forEach((r) => {
+                        if (r.status === 'success') counts.success++;
+                        else if (r.status === 'fail') counts.fail++;
+                        else if (r.status === 'agent-offline' || r.status === 'dispatch-failed') counts.offline++;
+                        else counts.pending++;
+                        counts.dispatched++;
+                    });
+                    return {
+                        id: d.id, timestamp: d.timestamp, user: d.user,
+                        softs: d.softs, nodes: d.nodes, counts: counts,
+                    };
+                });
+            sendJson(res, 200, { deployments: list });
             return;
         }
 

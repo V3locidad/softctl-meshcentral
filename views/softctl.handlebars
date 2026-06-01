@@ -35,6 +35,12 @@
   #preview { margin-top: 10px; background: #111; color: #ddd; font-family: Menlo, Consolas, monospace; font-size: 12px; padding: 8px; border-radius: 4px; max-height: 220px; overflow: auto; white-space: pre-wrap; display: none; flex: 0 0 auto; }
   .badgeOs { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #e2e3e5; color: #383d41; margin-right: 4px; }
   .badgeWarn { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #fff3cd; color: #856404; margin-left: 4px; }
+  .badgeArch { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #e2e3e5; color: #383d41; margin-left: 4px; font-family: Menlo, Consolas, monospace; }
+  .resCell { padding: 3px 6px; border-radius: 3px; font-size: 11px; display: inline-block; min-width: 60px; text-align: center; }
+  .resCell.success { background: #d4edda; color: #155724; }
+  .resCell.fail    { background: #f8d7da; color: #721c24; }
+  .resCell.pending { background: #fff3cd; color: #856404; }
+  .resCell.offline { background: #e2e3e5; color: #383d41; }
   .rowActions { display: flex; gap: 4px; flex: 0 0 auto; opacity: 0; transition: opacity .1s; }
   .row:hover .rowActions { opacity: 1; }
   .rowActions button { padding: 2px 6px; font-size: 11px; }
@@ -55,6 +61,7 @@
 
 <div class="bar">
   <span style="flex:1"></span>
+  <button id="historyBtn">Historique</button>
   <button id="refreshBtn" class="primary">Rafraîchir</button>
 </div>
 
@@ -133,10 +140,11 @@
                : (isZip && !s.archiveInstaller) ? '<span class="badgeWarn" title="archiveInstaller non défini : chemin de l\'installeur dans le zip">chemin archive manquant</span>'
                : !s.silentArgs ? '<span class="badgeWarn" title="silentArgs non défini — installation interactive">non-silencieux</span>'
                : (isZip ? '<span class="badgeWarn" style="background:#d1ecf1;color:#0c5460" title="Sera extrait avant install">archive</span>' : '');
+      var archBadge = s.arch ? '<span class="badgeArch" title="Architecture détectée">' + escapeHtml(s.arch) + '</span>' : '';
       return '<div class="row' + sel + '" data-id="' + escapeHtml(s.id) + '">'
            +   '<input type="checkbox" class="chk"' + checked + '>'
            +   '<div class="main">'
-           +     '<div class="title">' + escapeHtml(s.name) + (s.version ? ' <span style="color:#888;font-weight:normal">' + escapeHtml(s.version) + '</span>' : '') + warn + '</div>'
+           +     '<div class="title">' + escapeHtml(s.name) + (s.version ? ' <span style="color:#888;font-weight:normal">' + escapeHtml(s.version) + '</span>' : '') + archBadge + warn + '</div>'
            +     '<div class="sub">'
            +       (s.vendor ? escapeHtml(s.vendor) + ' · ' : '')
            +       (s.installer ? escapeHtml(s.installer) + ' · ' : '')
@@ -179,6 +187,7 @@
            +     '<div class="sub">'
            +       (a.mesh ? '<span class="badgeOs" style="background:#d1ecf1;color:#0c5460">' + escapeHtml(a.mesh) + '</span>' : '')
            +       '<span class="badgeOs">' + escapeHtml(a.os || '?') + '</span>'
+           +       (a.arch ? '<span class="badgeArch">' + escapeHtml(a.arch) + '</span>' : '')
            +     '</div>'
            +   '</div>'
            + '</div>';
@@ -284,11 +293,37 @@
     });
   };
 
+  // Détecte les mismatches d'arch entre softs et postes sélectionnés.
+  // Retourne une liste lisible des avertissements.
+  function detectArchMismatches() {
+    var picked = softwares.filter(function (s) { return softSel[s.id]; });
+    var pickedAgents = agents.filter(function (a) { return agentSel[a.id]; });
+    var warnings = [];
+    picked.forEach(function (s) {
+      if (!s.arch) return;  // soft "any" — on suppose compatible partout
+      pickedAgents.forEach(function (a) {
+        if (!a.arch) return;
+        // x64 installer sur poste x86 = bloqué techniquement par Windows. Autres
+        // combinaisons (x86 sur x64 par ex.) marchent généralement, donc on
+        // n'avertit que sur les vrais conflits.
+        if (s.arch === 'x64' && a.arch === 'x86') warnings.push(s.name + ' (x64) ↛ ' + a.name + ' (x86)');
+        if (s.arch === 'arm64' && a.arch !== 'arm64') warnings.push(s.name + ' (arm64) ↛ ' + a.name + ' (' + a.arch + ')');
+      });
+    });
+    return warnings;
+  }
+
   $('deployBtn').onclick = function () {
     var ns = Object.keys(softSel).length, na = Object.keys(agentSel).length;
+    var warnings = detectArchMismatches();
     var msg = 'Déployer ' + ns + ' logiciel(s) sur ' + na + ' poste(s) ?\n\n'
             + 'Les installeurs vont s\'exécuter en arrière-plan sur chaque poste avec leurs arguments silencieux.\n'
             + 'Si silentArgs est vide, l\'installeur sera interactif et un utilisateur devra cliquer côté poste.';
+    if (warnings.length) {
+      msg += '\n\n⚠ ATTENTION — incompatibilités d\'architecture détectées :\n  ' + warnings.slice(0, 8).join('\n  ');
+      if (warnings.length > 8) msg += '\n  … (+' + (warnings.length - 8) + ' autres)';
+      msg += '\n\nContinuer malgré tout ?';
+    }
     if (!confirm(msg)) return;
     var body = { softIds: Object.keys(softSel), nodeIds: Object.keys(agentSel) };
     $('preview').style.display = '';
@@ -297,19 +332,112 @@
     api('deploy', null, body).then(function (r) {
       $('deployBtn').textContent = 'Déployer'; $('deployBtn').disabled = !(ns && na);
       if (r.error) { $('preview').textContent = 'Erreur: ' + r.error; return; }
-      var lines = ['— DÉPLOIEMENT —',
-                   (r.dispatched || 0) + ' commande(s) envoyée(s), ' + (r.failed || 0) + ' échec(s) (' + (r.total || 0) + ' au total)',
-                   '', r.note || '', ''];
-      var fails = (r.results || []).filter(function (x) { return !x.ok; });
-      if (fails.length) {
-        lines.push('Postes en échec au dispatch :');
-        fails.forEach(function (f) { lines.push('  ✗ ' + f.nodeId.substring(0, 20) + '…  ' + (f.error || '?')); });
-        lines.push('');
-      }
-      lines.push('Pour suivre l\'installation côté poste, ouvre le poste dans MeshCentral → onglet Console.');
-      $('preview').textContent = lines.join('\n');
+      // On démarre un polling sur le deploymentId pour afficher l'avancement en
+      // temps réel (5s d'intervalle, on arrête au bout de 10 min).
+      if (r.deploymentId) followDeployment(r.deploymentId);
+      else $('preview').textContent = (r.dispatched || 0) + ' commande(s) envoyée(s).';
     });
   };
+
+  function statusLabel(st) {
+    if (st === 'success') return 'OK';
+    if (st === 'fail') return 'ÉCHEC';
+    if (st === 'agent-offline') return 'agent off';
+    if (st === 'dispatch-failed') return 'dispatch KO';
+    return 'en cours…';
+  }
+  function statusClass(st) {
+    if (st === 'success') return 'success';
+    if (st === 'fail') return 'fail';
+    if (st === 'agent-offline' || st === 'dispatch-failed') return 'offline';
+    return 'pending';
+  }
+
+  function followDeployment(id) {
+    var startedAt = Date.now();
+    var maxFollowMs = 10 * 60 * 1000;
+    var tick = function () {
+      api('deployment', { id: id }).then(function (r) {
+        if (r.error) { $('preview').textContent = 'Erreur: ' + r.error; return; }
+        var d = r.deployment;
+        if (!d) { $('preview').textContent = 'Déploiement introuvable.'; return; }
+        renderDeployment(d);
+        var allDone = Object.values(d.results || {}).every(function (x) {
+          return x.status === 'success' || x.status === 'fail' || x.status === 'agent-offline' || x.status === 'dispatch-failed';
+        });
+        if (!allDone && (Date.now() - startedAt) < maxFollowMs) {
+          setTimeout(tick, 5000);
+        }
+      });
+    };
+    tick();
+  }
+
+  function renderDeployment(d) {
+    var agentName = function (id) {
+      var a = agents.find(function (x) { return x.id === id; });
+      return a ? a.name : id.slice(0, 12);
+    };
+    var html = '<div style="background:#f4f4f4;padding:8px;border-radius:4px;margin-bottom:8px"><b>Déploiement</b> ' + escapeHtml(d.id) + ' par ' + escapeHtml(d.user) + ' · ' + new Date(d.timestamp).toLocaleString() + '</div>';
+    html += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th style="text-align:left;padding:4px;border-bottom:1px solid #ddd">Poste</th>';
+    (d.softs || []).forEach(function (s) {
+      html += '<th style="text-align:left;padding:4px;border-bottom:1px solid #ddd">' + escapeHtml(s.name) + '</th>';
+    });
+    html += '</tr></thead><tbody>';
+    (d.nodes || []).forEach(function (n) {
+      html += '<tr><td style="padding:4px;border-bottom:1px solid #f0f0f0">' + escapeHtml(agentName(n.id)) + '</td>';
+      (d.softs || []).forEach(function (s) {
+        var key = s.id + '|' + n.id;
+        var r = (d.results || {})[key] || { status: 'pending' };
+        var ec = r.exitCode != null ? ' (' + r.exitCode + ')' : '';
+        html += '<td style="padding:4px;border-bottom:1px solid #f0f0f0"><span class="resCell ' + statusClass(r.status) + '">' + statusLabel(r.status) + ec + '</span></td>';
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    $('preview').style.display = 'none';
+    var existing = document.getElementById('deployResult');
+    if (existing) existing.remove();
+    var div = document.createElement('div');
+    div.id = 'deployResult';
+    div.style.cssText = 'margin-top:10px;border:1px solid #ddd;border-radius:4px;padding:10px;max-height:340px;overflow:auto';
+    div.innerHTML = html;
+    document.body.appendChild(div);
+  }
+
+  function openHistory() {
+    var bg = showModal([
+      '<h3>Historique des déploiements</h3>',
+      '<div id="histBody">Chargement…</div>',
+      '<div class="actions"><button id="hClose">Fermer</button></div>',
+    ].join(''));
+    bg.querySelector('#hClose').onclick = function () { closeModal(bg); };
+    api('history').then(function (r) {
+      var rows = (r.deployments || []).map(function (d) {
+        var c = d.counts || {};
+        var when = new Date(d.timestamp).toLocaleString();
+        var softs = (d.softs || []).map(function (s) { return s.name; }).join(', ');
+        return '<div style="padding:6px 8px;border-bottom:1px solid #f0f0f0;cursor:pointer" data-id="' + escapeHtml(d.id) + '">'
+             + '<div><b>' + escapeHtml(when) + '</b> · ' + escapeHtml(d.user) + '</div>'
+             + '<div style="color:#666;font-size:11px;margin-top:2px">' + escapeHtml(softs.slice(0, 100)) + (softs.length > 100 ? '…' : '') + '</div>'
+             + '<div style="margin-top:4px">'
+             +   '<span class="resCell success">' + c.success + ' OK</span> '
+             +   '<span class="resCell fail">' + c.fail + ' KO</span> '
+             +   '<span class="resCell pending">' + c.pending + ' attente</span> '
+             +   '<span class="resCell offline">' + c.offline + ' off</span>'
+             + '</div></div>';
+      }).join('');
+      bg.querySelector('#histBody').innerHTML = rows || '<div class="empty">Pas encore de déploiement.</div>';
+      [].slice.call(bg.querySelectorAll('[data-id]')).forEach(function (el) {
+        el.onclick = function () {
+          var id = el.getAttribute('data-id');
+          closeModal(bg);
+          followDeployment(id);
+        };
+      });
+    });
+  }
+  $('historyBtn').onclick = openHistory;
 
   // ---- modal helpers ----
   function showModal(html) {
@@ -395,6 +523,15 @@
       '<div class="field"><label>Fichier installeur (nom)</label><input type="text" id="eInstaller" value="' + escapeHtml(s.installer) + '">',
       '  <div class="help">Nom du fichier dans le dossier. Pour le remplacer par un nouveau binaire, utilise le champ ci-dessous.</div>',
       '</div>',
+      '<div class="field"><label>Architecture</label>',
+      '  <select id="eArch">',
+      '    <option value=""' + (!s.arch ? ' selected' : '') + '>Auto / Toutes</option>',
+      '    <option value="x86"' + (s.arch === 'x86' ? ' selected' : '') + '>x86 (32-bit)</option>',
+      '    <option value="x64"' + (s.arch === 'x64' ? ' selected' : '') + '>x64 (64-bit)</option>',
+      '    <option value="arm64"' + (s.arch === 'arm64' ? ' selected' : '') + '>ARM64</option>',
+      '  </select>',
+      '  <div class="help">Sert à filtrer/avertir quand l\'arch du poste ne correspond pas. "Auto" devine depuis le nom de fichier.</div>',
+      '</div>',
       '<div class="field"><label>Chemin dans le .zip (si applicable)</label><input type="text" id="eArchive" value="' + escapeHtml(s.archiveInstaller || '') + '" placeholder="Anagene/setup.exe">',
       '  <div class="help">Uniquement pour les installeurs livrés en archive : chemin relatif de l\'exécutable principal à l\'intérieur du .zip.</div>',
       '</div>',
@@ -418,6 +555,7 @@
         vendor: bg.querySelector('#eVendor').value.trim(),
         silentArgs: bg.querySelector('#eSilent').value.trim(),
         archiveInstaller: bg.querySelector('#eArchive').value.trim(),
+        arch: bg.querySelector('#eArch').value,
       };
       // Le champ installer n'est patché que s'il n'y a pas de remplacement ET
       // qu'il a été modifié manuellement par l'utilisateur. Sinon c'est
