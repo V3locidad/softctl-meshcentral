@@ -68,7 +68,11 @@
 
   <div class="col">
     <h3>Postes <span id="agentCount" class="pill">0</span><span class="spacer"></span><button id="selAllAgent">Tout</button><button id="selNoneAgent">Aucun</button></h3>
-    <div class="search"><input type="text" id="agentFilter" placeholder="Filtrer (nom poste, OS…)"></div>
+    <div class="search" style="display:flex;gap:6px;align-items:center">
+      <select id="meshSel" style="padding:3px 6px;border:1px solid #bbb;border-radius:3px;font-size:13px;max-width:50%"></select>
+      <button id="selMeshBtn">Cocher la salle</button>
+      <input type="text" id="agentFilter" placeholder="Filtrer (nom, salle, OS…)" style="flex:1">
+    </div>
     <div class="body" id="agentList"><div class="empty">Chargement…</div></div>
   </div>
 </div>
@@ -112,6 +116,7 @@
 
   var softwares = [];
   var agents = [];
+  var meshes = [];
   var softSel = {};   // id -> true
   var agentSel = {};  // id -> true
 
@@ -157,11 +162,13 @@
 
   function renderAgents() {
     var q = ($('agentFilter').value || '').toLowerCase().trim();
+    var meshFilter = $('meshSel').value;  // empty = all salles
     var rows = agents.filter(function (a) {
+      if (meshFilter && a.meshid !== meshFilter) return false;
       if (!q) return true;
-      return [a.name, a.os].some(function (v) { return (v || '').toLowerCase().indexOf(q) !== -1; });
+      return [a.name, a.os, a.mesh].some(function (v) { return (v || '').toLowerCase().indexOf(q) !== -1; });
     });
-    $('agentCount').textContent = agents.length;
+    $('agentCount').textContent = rows.length + (rows.length !== agents.length ? ' / ' + agents.length : '');
     if (!rows.length) { $('agentList').innerHTML = '<div class="empty">Aucun poste.</div>'; return; }
     $('agentList').innerHTML = rows.map(function (a) {
       var checked = agentSel[a.id] ? ' checked' : '';
@@ -170,11 +177,24 @@
            +   '<input type="checkbox" class="chk"' + checked + '>'
            +   '<div class="main">'
            +     '<div class="title">' + escapeHtml(a.name) + '</div>'
-           +     '<div class="sub"><span class="badgeOs">' + escapeHtml(a.os || '?') + '</span></div>'
+           +     '<div class="sub">'
+           +       (a.mesh ? '<span class="badgeOs" style="background:#d1ecf1;color:#0c5460">' + escapeHtml(a.mesh) + '</span>' : '')
+           +       '<span class="badgeOs">' + escapeHtml(a.os || '?') + '</span>'
+           +     '</div>'
            +   '</div>'
            + '</div>';
     }).join('');
     bindRowToggle('agentList', agentSel, renderAgents);
+  }
+
+  function renderMeshSelect() {
+    var opts = '<option value="">— Toutes les salles —</option>';
+    meshes.forEach(function (m) {
+      // Show how many agents the salle has; otherwise the dropdown is opaque.
+      var count = agents.filter(function (a) { return a.meshid === m.id; }).length;
+      opts += '<option value="' + escapeHtml(m.id) + '">' + escapeHtml(m.name) + ' (' + count + ')</option>';
+    });
+    $('meshSel').innerHTML = opts;
   }
 
   function bindRowToggle(containerId, selStore, rerender) {
@@ -226,6 +246,8 @@
         return;
       }
       agents = r.agents || [];
+      meshes = r.meshes || [];
+      renderMeshSelect();
       renderAgents();
     });
   }
@@ -237,6 +259,13 @@
   $('selNoneSoft').onclick = function () { softSel = {}; renderSoft(); updateSummary(); };
   $('selAllAgent').onclick = function () { agents.forEach(function (a) { agentSel[a.id] = true; }); renderAgents(); updateSummary(); };
   $('selNoneAgent').onclick = function () { agentSel = {}; renderAgents(); updateSummary(); };
+  $('meshSel').onchange = renderAgents;
+  $('selMeshBtn').onclick = function () {
+    var mid = $('meshSel').value;
+    if (!mid) { alert('Choisis d\'abord une salle dans le menu déroulant.'); return; }
+    agents.filter(function (a) { return a.meshid === mid; }).forEach(function (a) { agentSel[a.id] = true; });
+    renderAgents(); updateSummary();
+  };
   $('deployBtn').onclick = function () {
     var body = { softIds: Object.keys(softSel), nodeIds: Object.keys(agentSel) };
     $('preview').style.display = '';

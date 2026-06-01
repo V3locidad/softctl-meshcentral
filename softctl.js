@@ -83,30 +83,38 @@ module.exports.softctl = function (parent) {
         20: 'FreeBSD',
     };
 
-    // List the MeshCentral agents (nodes). We read directly from the MC database
-    // since obj.meshServer.db.GetAllType('node', cb) is supported by both NeDB
-    // and MongoDB backends.
+    // List the MeshCentral agents (nodes) and the meshes ("salles") they belong to.
+    // We fetch both types in one pass and resolve each node's mesh name so the UI
+    // can group/select per room without a second round-trip.
     function listAgents(cb) {
         const db = obj.meshServer && obj.meshServer.db;
         if (!db || typeof db.GetAllType !== 'function') return cb(new Error('MC DB inaccessible'));
-        db.GetAllType('node', function (err, docs) {
-            if (err) return cb(err);
-            const agents = (docs || []).filter((d) => d && d._id && (d.agent || d.osdesc)).map((d) => {
-                const family = (d.agent && AGENT_TYPE[d.agent.id]) || '';
-                // Prefer the human-friendly osdesc ("Windows 10 Pro"); fall back to
-                // the family name derived from MC's numeric agent type code.
-                const os = d.osdesc || family || '?';
-                return {
-                    id: d._id,
-                    name: d.name || d.host || d._id,
-                    meshid: d.meshid || '',
-                    os: os,
-                    family: family,
-                    lastConnect: d.lastConnectTime || 0,
-                };
+        db.GetAllType('mesh', function (meshErr, meshDocs) {
+            if (meshErr) return cb(meshErr);
+            const meshById = {};
+            (meshDocs || []).forEach((m) => { if (m && m._id) meshById[m._id] = m.name || m._id; });
+            db.GetAllType('node', function (err, docs) {
+                if (err) return cb(err);
+                const agents = (docs || []).filter((d) => d && d._id && (d.agent || d.osdesc)).map((d) => {
+                    const family = (d.agent && AGENT_TYPE[d.agent.id]) || '';
+                    const os = d.osdesc || family || '?';
+                    return {
+                        id: d._id,
+                        name: d.name || d.host || d._id,
+                        meshid: d.meshid || '',
+                        mesh: meshById[d.meshid] || '',
+                        os: os,
+                        family: family,
+                        lastConnect: d.lastConnectTime || 0,
+                    };
+                });
+                agents.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { numeric: true }));
+                // Surface the mesh catalogue alongside so the dropdown can be built
+                // even when no agents currently belong to a particular salle.
+                const meshes = Object.keys(meshById).map((id) => ({ id: id, name: meshById[id] }));
+                meshes.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { numeric: true }));
+                cb(null, agents, meshes);
             });
-            agents.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { numeric: true }));
-            cb(null, agents);
         });
     }
 
@@ -132,9 +140,9 @@ module.exports.softctl = function (parent) {
         }
 
         if (action === 'agents') {
-            listAgents(function (err, agents) {
+            listAgents(function (err, agents, meshes) {
                 if (err) return sendJson(res, 500, { error: err.message });
-                sendJson(res, 200, { agents: agents });
+                sendJson(res, 200, { agents: agents, meshes: meshes || [] });
             });
             return;
         }
