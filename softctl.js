@@ -222,6 +222,37 @@ module.exports.softctl = function (parent) {
             return;
         }
 
+        if (action === 'replaceInstaller') {
+            // POST avec le nouveau fichier en raw body. Si le nom diffère de l'ancien,
+            // on supprime l'ancien et on met à jour metadata.json en conséquence.
+            try {
+                const cfg = loadCfg();
+                const slug = String(req.query.slug || '').trim();
+                const folder = softwareFolder(cfg, slug);
+                const metaPath = path.join(folder, 'metadata.json');
+                if (!fs.existsSync(metaPath)) return sendJson(res, 404, { error: 'logiciel introuvable' });
+                const filename = String(req.query.filename || '').replace(/[\\/]/g, '_').trim();
+                if (!filename || !/\.(exe|msi)$/i.test(filename)) return sendJson(res, 400, { error: 'filename .exe ou .msi requis' });
+                const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+                const oldInstaller = meta.installer || '';
+                const newPath = path.join(folder, filename);
+                const ws = fs.createWriteStream(newPath);
+                req.pipe(ws);
+                ws.on('finish', () => {
+                    // Si on remplace par un nom différent, on vire l'ancien.
+                    if (oldInstaller && oldInstaller !== filename) {
+                        const oldPath = path.join(folder, oldInstaller);
+                        try { if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath); } catch (_) {}
+                    }
+                    meta.installer = filename;
+                    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+                    sendJson(res, 200, { ok: true, installer: filename });
+                });
+                ws.on('error', (e) => sendJson(res, 500, { error: 'write failed: ' + e.message }));
+            } catch (e) { sendJson(res, 500, { error: e.message }); }
+            return;
+        }
+
         if (action === 'deleteSoftware') {
             try {
                 const cfg = loadCfg();

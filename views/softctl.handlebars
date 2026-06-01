@@ -362,8 +362,11 @@
       '  <div class="field" style="flex:1"><label>Éditeur</label><input type="text" id="eVendor" value="' + escapeHtml(s.vendor) + '"></div>',
       '</div>',
       '<div class="field"><label>Arguments silencieux</label><input type="text" id="eSilent" value="' + escapeHtml(s.silentArgs) + '"></div>',
-      '<div class="field"><label>Fichier installeur</label><input type="text" id="eInstaller" value="' + escapeHtml(s.installer) + '">',
-      '  <div class="help">Pour remplacer le fichier lui-même, supprime le logiciel et ré-ajoute-le.</div>',
+      '<div class="field"><label>Fichier installeur (nom)</label><input type="text" id="eInstaller" value="' + escapeHtml(s.installer) + '">',
+      '  <div class="help">Nom du fichier dans le dossier. Pour le remplacer par un nouveau binaire, utilise le champ ci-dessous.</div>',
+      '</div>',
+      '<div class="field"><label>Remplacer le fichier .exe / .msi (optionnel)</label><input type="file" id="eFile" accept=".exe,.msi">',
+      '  <div class="help">Si tu choisis un fichier ici, il sera uploadé et remplacera l\'installeur actuel (l\'ancien fichier sera supprimé).</div>',
       '</div>',
       '<div class="actions">',
       '  <button id="eCancel">Annuler</button>',
@@ -372,16 +375,39 @@
     ].join(''));
     bg.querySelector('#eCancel').onclick = function () { closeModal(bg); };
     bg.querySelector('#eSubmit').onclick = function () {
+      var err = bg.querySelector('#eErr');
+      err.style.display = 'none';
+      var submit = bg.querySelector('#eSubmit');
+      var file = bg.querySelector('#eFile').files[0];
       var patch = {
         name: bg.querySelector('#eName').value.trim(),
         version: bg.querySelector('#eVersion').value.trim(),
         vendor: bg.querySelector('#eVendor').value.trim(),
         silentArgs: bg.querySelector('#eSilent').value.trim(),
-        installer: bg.querySelector('#eInstaller').value.trim(),
       };
-      api('updateSoftware', { slug: slug }, patch).then(function (r) {
-        var err = bg.querySelector('#eErr');
-        if (r.error) { err.textContent = r.error; err.style.display = 'block'; return; }
+      // Le champ installer n'est patché que s'il n'y a pas de remplacement ET
+      // qu'il a été modifié manuellement par l'utilisateur. Sinon c'est
+      // replaceInstaller qui le réécrit lui-même.
+      var newInstaller = bg.querySelector('#eInstaller').value.trim();
+      if (!file && newInstaller !== s.installer) patch.installer = newInstaller;
+
+      // Étape 1 (optionnelle): upload du binaire de remplacement.
+      submit.disabled = true; submit.textContent = file ? 'Upload…' : 'Enregistrement…';
+      var step1 = file
+        ? fetch('/pluginadmin.ashx?pin=softctl&action=replaceInstaller&slug=' + encodeURIComponent(slug) + '&filename=' + encodeURIComponent(file.name),
+                { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/octet-stream' }, body: file })
+            .then(function (r) { return r.json(); })
+        : Promise.resolve({ ok: true });
+
+      step1.then(function (r1) {
+        if (r1.error) { err.textContent = r1.error; err.style.display = 'block'; submit.disabled = false; submit.textContent = 'Enregistrer'; return null; }
+        // Étape 2: mise à jour des métadonnées (toujours faite, même sans patch
+        // — c'est une no-op côté serveur si rien n'a changé).
+        submit.textContent = 'Enregistrement…';
+        return api('updateSoftware', { slug: slug }, patch);
+      }).then(function (r2) {
+        if (!r2) return;
+        if (r2.error) { err.textContent = r2.error; err.style.display = 'block'; submit.disabled = false; submit.textContent = 'Enregistrer'; return; }
         closeModal(bg); load();
       });
     };
