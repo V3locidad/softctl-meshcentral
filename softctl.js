@@ -50,6 +50,15 @@ module.exports.softctl = function (parent) {
         res.status(code || 200).set('Content-Type', 'application/json').send(JSON.stringify(payload));
     }
 
+    // For actions that used to POST a JSON body, we accept the same payload as
+    // a `payload` query param now (the URL stays small for text actions). The
+    // `?payload=` form is what the frontend sends; MC happily accepts GET.
+    function readJsonParam(req) {
+        const raw = (req.query && req.query.payload) || '';
+        if (!raw) return {};
+        try { return JSON.parse(raw); } catch (e) { return {}; }
+    }
+
     // Walk softwareDir/<slug>/metadata.json + locate the installer file.
     // Anything missing metadata.json is skipped (with a flag in the response so
     // the UI can show "folder ignored: no metadata.json"); we don't fail the whole
@@ -226,28 +235,22 @@ module.exports.softctl = function (parent) {
         }
 
         if (action === 'updateSoftware') {
-            // POST JSON body with the fields to overwrite. The installer file is
-            // never touched here — replacing the binary requires a separate
-            // re-upload via addSoftware (delete + add).
-            let body = '';
-            req.on('data', (c) => { body += c.toString('utf8'); });
-            req.on('end', () => {
-                try {
-                    const cfg = loadCfg();
-                    const slug = String(req.query.slug || '').trim();
-                    const folder = softwareFolder(cfg, slug);
-                    const metaPath = path.join(folder, 'metadata.json');
-                    if (!fs.existsSync(metaPath)) return sendJson(res, 404, { error: 'logiciel introuvable' });
-                    const current = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-                    const patch = JSON.parse(body || '{}');
-                    // Only allow whitelisted keys; ignore anything else.
-                    ['name', 'version', 'vendor', 'silentArgs', 'installer', 'archiveInstaller'].forEach((k) => {
-                        if (patch[k] !== undefined) current[k] = String(patch[k]).trim();
-                    });
-                    fs.writeFileSync(metaPath, JSON.stringify(current, null, 2));
-                    sendJson(res, 200, { ok: true, software: current });
-                } catch (e) { sendJson(res, 500, { error: e.message }); }
-            });
+            // Now GET with ?payload=<json> in the query string (MC's POST is
+            // rejected by the server's CSRF-like check for plugin admin posts).
+            try {
+                const cfg = loadCfg();
+                const slug = String(req.query.slug || '').trim();
+                const folder = softwareFolder(cfg, slug);
+                const metaPath = path.join(folder, 'metadata.json');
+                if (!fs.existsSync(metaPath)) return sendJson(res, 404, { error: 'logiciel introuvable' });
+                const current = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+                const patch = readJsonParam(req);
+                ['name', 'version', 'vendor', 'silentArgs', 'installer', 'archiveInstaller'].forEach((k) => {
+                    if (patch[k] !== undefined) current[k] = String(patch[k]).trim();
+                });
+                fs.writeFileSync(metaPath, JSON.stringify(current, null, 2));
+                sendJson(res, 200, { ok: true, software: current });
+            } catch (e) { sendJson(res, 500, { error: e.message }); }
             return;
         }
 
@@ -320,14 +323,10 @@ module.exports.softctl = function (parent) {
         if (action === 'deploy') {
             // Vrai déploiement: pour chaque soft sélectionné on génère un token
             // d'usage unique, on construit le script PS, et on l'envoie à chaque
-            // agent via son WebSocket MeshCentral. On retourne immédiatement le
-            // nombre de dispatches OK/KO (sans attendre le code retour de l'install).
-            let body = '';
-            req.on('data', (c) => { body += c.toString('utf8'); });
-            req.on('end', () => {
-                let payload;
-                try { payload = JSON.parse(body || '{}'); }
-                catch (e) { return sendJson(res, 400, { error: 'invalid JSON body' }); }
+            // agent via son WebSocket MeshCentral. Maintenant en GET via payload=…
+            // pour contourner le 401 de MC sur POST.
+            const payload = readJsonParam(req);
+            (function () {
                 const softIds = Array.isArray(payload.softIds) ? payload.softIds : [];
                 const nodeIds = Array.isArray(payload.nodeIds) ? payload.nodeIds : [];
                 if (!softIds.length || !nodeIds.length) return sendJson(res, 400, { error: 'softIds et nodeIds requis' });
@@ -422,19 +421,14 @@ module.exports.softctl = function (parent) {
                     note: ok + ' commande(s) envoyée(s), ' + fail + ' échec(s) au dispatch. Le résultat d\'installation côté poste apparaît dans l\'onglet "Console" du poste dans MeshCentral.',
                     results: results.slice(0, 50),
                 });
-            });
+            })();
             return;
         }
 
         if (action === 'dryRun') {
-            // For now we just echo what we'd push, so the UI can show a preview.
-            // Phase 3 will replace this with the real agent dispatch.
-            let body = '';
-            req.on('data', (c) => { body += c.toString('utf8'); });
-            req.on('end', () => {
-                let payload;
-                try { payload = JSON.parse(body || '{}'); }
-                catch (e) { return sendJson(res, 400, { error: 'invalid JSON body' }); }
+            // Aperçu sans rien envoyer. GET avec payload=… (JSON encodé).
+            try {
+                const payload = readJsonParam(req);
                 const softIds = Array.isArray(payload.softIds) ? payload.softIds : [];
                 const nodeIds = Array.isArray(payload.nodeIds) ? payload.nodeIds : [];
                 const cat = listCatalog();
@@ -444,11 +438,12 @@ module.exports.softctl = function (parent) {
                         software: s.name + (s.version ? ' ' + s.version : ''),
                         installer: s.installer,
                         silentArgs: s.silentArgs,
+                        archiveInstaller: s.archiveInstaller,
                         nodes: nodeIds.length,
                     })),
-                    note: 'Phase 1: dry-run only. Aucune commande envoyée aux agents.',
+                    note: 'Aperçu uniquement, aucune commande envoyée aux agents.',
                 });
-            });
+            } catch (e) { sendJson(res, 500, { error: e.message }); }
             return;
         }
 

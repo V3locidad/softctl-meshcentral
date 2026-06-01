@@ -89,17 +89,14 @@
 <script>
   function $(id) { return document.getElementById(id); }
   function api(action, params, body) {
+    // MC bloque les POST sur pluginadmin.ashx (même problème que dans adctl).
+    // On passe TOUT en GET, le body est encodé dans la query string en JSON.
     var qs = 'action=' + encodeURIComponent(action);
     if (params) Object.keys(params).forEach(function (k) {
       qs += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
     });
-    var opts = { credentials: 'include' };
-    if (body) {
-      opts.method = 'POST';
-      opts.headers = { 'Content-Type': 'application/json' };
-      opts.body = JSON.stringify(body);
-    }
-    return fetch('/pluginadmin.ashx?pin=softctl&' + qs, opts).then(function (r) { return r.json(); });
+    if (body) qs += '&payload=' + encodeURIComponent(JSON.stringify(body));
+    return fetch('/pluginadmin.ashx?pin=softctl&' + qs, { credentials: 'include' }).then(function (r) { return r.json(); });
   }
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -368,9 +365,10 @@
       var qsStr = 'action=addSoftware&' + Object.keys(qs).map(function (k) { return k + '=' + encodeURIComponent(qs[k]); }).join('&');
       var submit = bg.querySelector('#aSubmit');
       submit.disabled = true; submit.textContent = 'Envoi en cours…';
-      // Stream the installer as the raw body — no multipart needed, scales to any size.
+      // PUT (et pas POST) pour contourner la protection CSRF/POST de MC sur
+      // pluginadmin.ashx. Le body brut continue de streamer le fichier.
       fetch('/pluginadmin.ashx?pin=softctl&' + qsStr, {
-        method: 'POST',
+        method: 'PUT',
         credentials: 'include',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: file,
@@ -430,7 +428,7 @@
       submit.disabled = true; submit.textContent = file ? 'Upload…' : 'Enregistrement…';
       var step1 = file
         ? fetch('/pluginadmin.ashx?pin=softctl&action=replaceInstaller&slug=' + encodeURIComponent(slug) + '&filename=' + encodeURIComponent(file.name),
-                { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/octet-stream' }, body: file })
+                { method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/octet-stream' }, body: file })
             .then(function (r) { return r.json(); })
         : Promise.resolve({ ok: true });
 
