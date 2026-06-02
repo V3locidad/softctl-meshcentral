@@ -126,27 +126,23 @@ function doInstall(data) {
 function runInstaller(target, silentArgs, L, done) {
     var cp = require('child_process');
     var ext = target.toLowerCase().split('.').pop();
-    var argv;
-    var exe;
     var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
+    // Wrapper cmd.exe /c — MeshAgent en service bloque le stdio des process
+    // lancés directement. Passer par cmd détache proprement et écrit le code
+    // retour qu'on lit ensuite.
+    var exe = windir + '\\System32\\cmd.exe';
+    var cmdLine;
     if (ext === 'msi') {
-        // MeshAgent execFile veut un chemin absolu. Pour MSI, on force /qn
-        // /norestart : msiexec ne comprend pas /S (flag NSIS/InnoSetup).
-        // Si silentArgs ressemble à du msiexec (commence par /q…), on l'utilise.
-        exe = windir + '\\System32\\msiexec.exe';
+        // Force /qn /norestart sauf si l'utilisateur a déjà mis /q...
         var msiArgs;
-        if (silentArgs && /^\s*\/q/i.test(silentArgs)) {
-            msiArgs = silentArgs.split(/\s+/).filter(Boolean);
-        } else {
-            msiArgs = ['/qn', '/norestart'];
-        }
-        argv = ['/i', target].concat(msiArgs);
-        L('exec ' + exe + ' ' + argv.join(' '));
+        if (silentArgs && /^\s*\/q/i.test(silentArgs)) msiArgs = silentArgs;
+        else msiArgs = '/qn /norestart';
+        cmdLine = 'msiexec.exe /i "' + target + '" ' + msiArgs;
     } else {
-        exe = target;
-        argv = silentArgs ? silentArgs.split(/\s+/).filter(Boolean) : [];
-        L('exec ' + target + ' ' + argv.join(' '));
+        cmdLine = '"' + target + '"' + (silentArgs ? ' ' + silentArgs : '');
     }
+    var argv = ['/c', cmdLine + ' >nul 2>nul'];
+    L('exec cmd /c ' + cmdLine);
     try {
         var child = cp.execFile(exe, argv);
         var finished = false;
