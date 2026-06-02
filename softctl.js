@@ -212,7 +212,14 @@ module.exports.softctl = function (parent) {
     // C'est le retour d'install : on met à jour le déploiement et l'historique.
     obj.serveraction = function (command, myparent) {
         try {
-            if (!command || command.pluginaction !== 'installComplete') return;
+            // Trace toute remontée pour diagnostiquer la liaison agent → serveur.
+            console.log('softctl: serveraction RX ' + JSON.stringify(command).slice(0, 300));
+            if (!command) return;
+            if (command.pluginaction === 'pong') {
+                console.log('softctl: PONG reçu de ' + (myparent && myparent.dbNodeKey) + ' platform=' + command.agent);
+                return;
+            }
+            if (command.pluginaction !== 'installComplete') return;
             const tok = command.dispatchId;
             if (!tok) return;
             const entry = reportTokens[tok];
@@ -783,6 +790,27 @@ module.exports.softctl = function (parent) {
                 webserverMethods: webserverMethods,
             });
             return;
+        }
+
+        if (action === 'pingAgent') {
+            // Envoie un message plugin "ping" à un agent et attend que le module
+            // meshcore softctl réponde "pong". Permet de valider la liaison
+            // sans déclencher d'install.
+            const nodeId = String(req.query.nodeId || '');
+            const ws = obj.meshServer && obj.meshServer.webserver;
+            const wsagents = ws && ws.wsagents;
+            const target = wsagents && wsagents[nodeId];
+            if (!target || typeof target.send !== 'function') {
+                return sendJson(res, 200, { ok: false, error: 'agent introuvable/déconnecté' });
+            }
+            const dispatchId = 'ping-' + Date.now();
+            try {
+                target.send(JSON.stringify({ action: 'plugin', plugin: 'softctl', pluginaction: 'ping', dispatchId: dispatchId }));
+                console.log('softctl: ping sent to ' + nodeId + ' dispatchId=' + dispatchId);
+                return sendJson(res, 200, { ok: true, dispatchId: dispatchId, note: 'regarde le log MC pour PONG' });
+            } catch (e) {
+                return sendJson(res, 200, { ok: false, error: e.message });
+            }
         }
 
         if (action === 'history') {
