@@ -775,6 +775,124 @@ module.exports.softctl = function (parent) {
             }
         }
 
+        if (action === 'wingetCatalog') {
+            // Catalogue winget (apps prédéfinies). Source : winget-catalog.json
+            // copié de l'ex-plugin wingetctl. Pas de matériel à héberger, juste
+            // des packageId que l'agent passera à winget.exe.
+            try {
+                const file = path.join(__dirname, 'winget-catalog.json');
+                sendJson(res, 200, JSON.parse(fs.readFileSync(file, 'utf8')));
+            } catch (e) { sendJson(res, 500, { error: e.message }); }
+            return;
+        }
+
+        if (action === 'wingetDeploy') {
+            // Déploiement winget : on réutilise toute la machinerie de tracking
+            // existante (deployments + reportTokens + installComplete). Chaque
+            // package est représenté comme un "soft" virtuel d'id 'winget:<pkg>'
+            // pour que l'historique et le polling UI fonctionnent à l'identique.
+            const payload = readJsonParam(req);
+            const packageIds = Array.isArray(payload.packageIds) ? payload.packageIds : [];
+            const nodeIds = Array.isArray(payload.nodeIds) ? payload.nodeIds : [];
+            const mode = (payload.mode === 'uninstall') ? 'uninstall' : 'install';
+            if (!packageIds.length || !nodeIds.length) return sendJson(res, 400, { error: 'packageIds et nodeIds requis' });
+
+            // Charge le catalogue pour récupérer le nom lisible de chaque app.
+            let nameById = {};
+            try {
+                const cat = JSON.parse(fs.readFileSync(path.join(__dirname, 'winget-catalog.json'), 'utf8'));
+                (cat.categories || []).forEach((c) => (c.apps || []).forEach((a) => { nameById[a.id] = a.name || a.id; }));
+            } catch (_) {}
+
+            const wsagents = obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents;
+            if (!wsagents) return sendJson(res, 500, { error: 'MC wsagents inaccessible' });
+
+            const deploymentId = crypto.randomBytes(8).toString('hex');
+            const userName = (user && (user.name || user._id)) || 'unknown';
+            const nodeNames = {};
+            if (obj.meshServer && obj.meshServer.db) {
+                nodeIds.forEach((nid) => {
+                    try {
+                        obj.meshServer.db.Get(nid, function (err, docs) {
+                            if (!err && docs && docs[0]) {
+                                nodeNames[nid] = docs[0].name || docs[0].host || nid;
+                                const d = deployments[deploymentId];
+                                if (d) {
+                                    const n = d.nodes.find((x) => x.id === nid);
+                                    if (n) n.name = nodeNames[nid];
+                                    saveHistory();
+                                }
+                            }
+                        });
+                    } catch (_) {}
+                });
+            }
+
+            const deployment = {
+                id: deploymentId,
+                timestamp: Date.now(),
+                user: userName,
+                softs: packageIds.map((pid) => ({
+                    id: 'winget:' + pid,
+                    name: (mode === 'uninstall' ? '[winget × ] ' : '[winget] ') + (nameById[pid] || pid),
+                })),
+                nodes: nodeIds.map((id) => ({ id: id, name: nodeNames[id] || '' })),
+                results: {},
+            };
+
+            const results = [];
+            packageIds.forEach((pid) => {
+                const virtSoftId = 'winget:' + pid;
+                nodeIds.forEach((nodeId) => {
+                    const key = virtSoftId + '|' + nodeId;
+                    const dispatchId = crypto.randomBytes(16).toString('hex');
+                    reportTokens[dispatchId] = {
+                        deploymentId: deploymentId, softId: virtSoftId, nodeId: nodeId,
+                        expires: Date.now() + REPORT_TTL_MS,
+                    };
+                    const ws = wsagents[nodeId];
+                    if (!ws || typeof ws.send !== 'function') {
+                        results.push({ packageId: pid, nodeId: nodeId, ok: false, error: 'agent déconnecté' });
+                        deployment.results[key] = { status: 'agent-offline', time: Date.now() };
+                        return;
+                    }
+                    const targetKey = ws.dbNodeKey || ws.nodeid || nodeId;
+                    if (targetKey !== nodeId) {
+                        results.push({ packageId: pid, nodeId: nodeId, ok: false, error: 'incohérence wsagent' });
+                        deployment.results[key] = { status: 'dispatch-failed', error: 'wsagent ciblage incohérent', time: Date.now() };
+                        return;
+                    }
+                    const message = {
+                        action: 'plugin', plugin: 'softctl',
+                        pluginaction: 'wingetInstall',
+                        dispatchId: dispatchId,
+                        packageId: pid,
+                        mode: mode,
+                    };
+                    try {
+                        ws.send(JSON.stringify(message));
+                        results.push({ packageId: pid, nodeId: nodeId, ok: true });
+                        deployment.results[key] = { status: 'dispatched', time: Date.now() };
+                    } catch (e) {
+                        results.push({ packageId: pid, nodeId: nodeId, ok: false, error: e.message });
+                        deployment.results[key] = { status: 'dispatch-failed', error: e.message, time: Date.now() };
+                    }
+                });
+            });
+
+            const ok = results.filter((r) => r.ok).length;
+            const fail = results.length - ok;
+            deployments[deploymentId] = deployment;
+            saveHistory();
+            sendJson(res, 200, {
+                deploymentId: deploymentId,
+                dispatched: ok, failed: fail, total: results.length,
+                note: ok + ' commande(s) winget envoyée(s), ' + fail + ' échec(s).',
+                results: results.slice(0, 50),
+            });
+            return;
+        }
+
         if (action === 'history') {
             // Liste les 50 derniers déploiements (triés par date desc).
             const list = Object.values(deployments)

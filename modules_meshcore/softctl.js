@@ -43,6 +43,9 @@ function consoleaction(args, rights, sessionid, parent) {
             case 'install':
                 doInstall(args);
                 return 'install started';
+            case 'wingetInstall':
+                doWingetInstall(args);
+                return 'winget started';
             default:
                 return 'softctl: action inconnue ' + fnname;
         }
@@ -120,6 +123,90 @@ function doInstall(data) {
             runInstaller(downloadPath, silentArgs, L, done);
         }
     });
+}
+
+function doWingetInstall(data) {
+    // Winget sous SYSTEM : winget.exe n'est pas dans le PATH (c'est un MSIX
+    // packagé pour l'utilisateur courant). On résout son chemin réel via le
+    // dossier WindowsApps de la machine — le binaire fonctionne en SYSTEM
+    // tant qu'on l'appelle par chemin absolu.
+    var fs = require('fs');
+    var cp = require('child_process');
+    var dispatchId = data.dispatchId;
+    var packageId = data.packageId;
+    var mode = (data.mode === 'uninstall') ? 'uninstall' : 'install';
+    var log = [];
+    function L(m) { log.push(m); dbg(m); }
+
+    function done(exit, err) {
+        reply({
+            pluginaction: 'installComplete',
+            dispatchId: dispatchId,
+            exit: (typeof exit === 'number') ? exit : -1,
+            log: log.slice(-30).join('\n'),
+            error: err ? String(err) : undefined,
+        });
+    }
+
+    if (!packageId) return done(-1, 'packageId manquant');
+
+    var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
+    var programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
+    var wingetExe = '';
+    try {
+        var wapps = programFiles + '\\WindowsApps';
+        var entries = fs.readdirSync(wapps);
+        for (var i = 0; i < entries.length; i++) {
+            if (/^Microsoft\.DesktopAppInstaller_/i.test(entries[i])) {
+                var candidate = wapps + '\\' + entries[i] + '\\winget.exe';
+                if (fs.existsSync(candidate)) { wingetExe = candidate; break; }
+            }
+        }
+    } catch (e) { L('scan WindowsApps: ' + e); }
+
+    if (!wingetExe) { L('winget.exe introuvable'); return done(-1, 'winget non installé (App Installer requis)'); }
+    L('winget exe: ' + wingetExe);
+
+    // On enveloppe dans cmd.exe /c pour les mêmes raisons que runInstaller
+    // (MeshAgent en service bloque les stdio des process lancés direct).
+    var exe = windir + '\\System32\\cmd.exe';
+    var verb = (mode === 'uninstall') ? 'uninstall' : 'install';
+    var cmdLine = '"' + wingetExe + '" ' + verb + ' --id ' + packageId
+        + ' --exact --silent --accept-source-agreements --accept-package-agreements'
+        + (mode === 'install' ? ' --scope machine' : '');
+    var argv = ['/c', cmdLine + ' >nul 2>nul'];
+    L('exec cmd /c ' + cmdLine);
+    try {
+        var child = cp.execFile(exe, argv);
+        var finished = false;
+        try {
+            child.on('exit', function (code) {
+                if (finished) return;
+                finished = true;
+                L('exit ' + code);
+                // winget renvoie parfois 0x8A150011 (déjà installé) ou
+                // 0x8A15002B (no applicable upgrade) qu'on mappe en succès.
+                if (code === -1978335215 /* 0x8A150011 */) { L('déjà installé'); return done(0); }
+                done(typeof code === 'number' ? code : -1);
+            });
+        } catch (e) {}
+        if (typeof child.exitCode === 'number' && !finished) {
+            finished = true;
+            L('exit (immédiat) ' + child.exitCode);
+            done(child.exitCode);
+            return;
+        }
+        setTimeout(function () {
+            if (finished) return;
+            finished = true;
+            try { child.kill(); } catch (e) {}
+            L('timeout (30 min)');
+            done(-1, 'timeout');
+        }, 30 * 60 * 1000);
+    } catch (e) {
+        L('spawn error: ' + e);
+        done(-1, e);
+    }
 }
 
 function runInstaller(target, silentArgs, L, done) {

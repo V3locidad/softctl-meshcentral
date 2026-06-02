@@ -1,0 +1,58 @@
+{
+  "categories": [
+    {
+      "name": "Browsers",
+      "apps": [
+        { "id": "Mozilla.Firefox",            "name": "Firefox" },
+        { "id": "Mozilla.Firefox.ESR",        "name": "Firefox ESR" },
+        { "id": "Google.Chrome",              "name": "Google Chrome" },
+        { "id": "Microsoft.Edge",             "name": "Microsoft Edge" }
+      ]
+    },
+    {
+      "name": "Office / Productivity",
+      "apps": [
+        { "id": "TheDocumentFoundation.LibreOffice", "name": "LibreOffice" },
+        { "id": "OnlyOffice.DesktopEditors",         "name": "OnlyOffice Desktop" },
+        { "id": "Microsoft.Office",                  "name": "Microsoft Office (Click-to-Run)" },
+        { "id": "Adobe.Acrobat.Reader.64-bit",       "name": "Adobe Acrobat Reader (64-bit)" }
+      ]
+    },
+    {
+      "name": "Multimedia",
+      "apps": [
+        { "id": "VideoLAN.VLC",          "name": "VLC media player" },
+        { "id": "GIMP.GIMP",             "name": "GIMP" },
+        { "id": "Audacity.Audacity",     "name": "Audacity" },
+        { "id": "OBSProject.OBSStudio",  "name": "OBS Studio" }
+      ]
+    },
+    {
+      "name": "Compression / Files",
+      "apps": [
+        { "id": "7zip.7zip",             "name": "7-Zip" },
+        { "id": "WinSCP.WinSCP",         "name": "WinSCP" },
+        { "id": "WinDirStat.WinDirStat", "name": "WinDirStat" }
+      ]
+    },
+    {
+      "name": "Dev / Tools",
+      "apps": [
+        { "id": "Microsoft.VisualStudioCode",      "name": "Visual Studio Code" },
+        { "id": "Notepad++.Notepad++",             "name": "Notepad++" },
+        { "id": "Git.Git",                         "name": "Git" },
+        { "id": "Python.Python.3.12",              "name": "Python 3.12" },
+        { "id": "OpenJS.NodeJS.LTS",               "name": "Node.js LTS" },
+        { "id": "PuTTY.PuTTY",                     "name": "PuTTY" }
+      ]
+    },
+    {
+      "name": "Communication",
+      "apps": [
+        { "id": "Zoom.Zoom",                       "name": "Zoom" },
+        { "id": "Microsoft.Teams",                 "name": "Microsoft Teams" },
+        { "id": "Discord.Discord",                 "name": "Discord" }
+      ]
+    }
+  ]
+}
