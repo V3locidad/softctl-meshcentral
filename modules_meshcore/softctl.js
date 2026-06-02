@@ -1,38 +1,57 @@
 /*
- * softctl — agent-side executor.
+ * softctl — agent-side executor (meshcore module).
  *
- * MeshCentral pousse ce module sur chaque agent au démarrage. Le serveur lui
- * envoie des messages { action: 'plugin', plugin: 'softctl', pluginaction: 'install', ... }
- * via le canal plugin, qui contourne la restriction "agent-features" sur runcommands.
+ * MeshCentral pousse ce module sur chaque agent. Quand le serveur envoie un
+ * { action:'plugin', plugin:'softctl', pluginaction:'install', ... }, l'agent
+ * appelle consoleaction(args, rights, sessionid, parent) ci-dessous (PAS
+ * serveraction — serveraction est côté serveur uniquement).
  *
- * Le module :
- *   1. Télécharge l'installeur depuis l'URL fournie (cert self-signed accepté)
- *   2. Si c'est un .zip avec archiveInstaller, extrait via tar (dispo dans Windows 10+)
- *   3. Lance l'installeur avec ses silentArgs en LocalSystem
- *   4. Renvoie au serveur le code retour via { pluginaction: 'installComplete', ... }
+ * Pour répondre au serveur on utilise parent.SendCommand({...}) qui pousse
+ * un message plugin de retour, reçu côté serveur par obj.serveraction.
  */
 
-var obj = {};
+"use strict";
 
-obj.consoleaction = function (args, rights, sessionid) {
-    return 'softctl agent module loaded.';
-};
+var mesh = null;
 
-// Réception des messages du serveur (canal plugin).
-obj.serveraction = function (data, rights, sessionid) {
+function dbg(m) {
     try {
-        if (data.pluginaction === 'install') doInstall(data);
-        else if (data.pluginaction === 'ping') reply({ pluginaction: 'pong', dispatchId: data.dispatchId, agent: process.platform });
-    } catch (e) {
-        reply({ pluginaction: 'installComplete', dispatchId: data && data.dispatchId, exit: -1, error: String(e) });
-    }
-};
+        var fs = require('fs');
+        var s = fs.createWriteStream('softctl.txt', { flags: 'a' });
+        s.write('\n' + new Date().toLocaleString() + ': ' + m);
+        s.end('\n');
+    } catch (e) {}
+}
 
 function reply(payload) {
     var msg = { action: 'plugin', plugin: 'softctl' };
     Object.keys(payload).forEach(function (k) { msg[k] = payload[k]; });
-    try { require('MeshAgent').SendCommand(JSON.stringify(msg)); }
-    catch (e) {}
+    try {
+        if (mesh && typeof mesh.SendCommand === 'function') mesh.SendCommand(msg);
+        else require('MeshAgent').SendCommand(JSON.stringify(msg));
+    } catch (e) { dbg('reply error: ' + e); }
+}
+
+function consoleaction(args, rights, sessionid, parent) {
+    mesh = parent;
+    var fnname = args.pluginaction || (args._ && args._[1]);
+    dbg('consoleaction ' + fnname);
+    try {
+        switch (fnname) {
+            case 'ping':
+                reply({ pluginaction: 'pong', dispatchId: args.dispatchId, agent: process.platform });
+                return 'pong';
+            case 'install':
+                doInstall(args);
+                return 'install started';
+            default:
+                return 'softctl: action inconnue ' + fnname;
+        }
+    } catch (e) {
+        dbg('consoleaction error: ' + e);
+        reply({ pluginaction: 'installComplete', dispatchId: args && args.dispatchId, exit: -1, error: String(e) });
+        return 'error ' + e;
+    }
 }
 
 function doInstall(data) {
@@ -46,10 +65,9 @@ function doInstall(data) {
     var archiveInstaller = data.archiveInstaller || '';
     var dispatchId = data.dispatchId;
     var log = [];
-    function L(m) { log.push(m); }
+    function L(m) { log.push(m); dbg(m); }
 
     function done(exit, err) {
-        // Best-effort cleanup
         try { rmRf(tmpDir); } catch (e) {}
         reply({
             pluginaction: 'installComplete',
@@ -60,11 +78,7 @@ function doInstall(data) {
         });
     }
 
-    try {
-        fs.mkdirSync(tmpDir);
-    } catch (e) {
-        try { mkdirP(tmpDir); } catch (e2) {}
-    }
+    try { mkdirP(tmpDir); } catch (e) {}
     var downloadPath = tmpDir + pathSep + installer;
     L('download ' + data.url + ' -> ' + downloadPath);
 
@@ -76,7 +90,6 @@ function doInstall(data) {
             if (!archiveInstaller) { L('zip mais archiveInstaller manquant'); return done(-1, 'archiveInstaller manquant'); }
             var extractDir = tmpDir + pathSep + 'extract';
             try { fs.mkdirSync(extractDir); } catch (e) {}
-            // tar (livré avec Windows 10+) sait extraire des .zip
             L('extract via tar -> ' + extractDir);
             cp.execFile('tar.exe', ['-xf', downloadPath, '-C', extractDir], { timeout: 600000 }, function (xerr) {
                 if (xerr) { L('tar error: ' + xerr); return done(-1, 'extract: ' + xerr); }
@@ -119,7 +132,6 @@ function runInstaller(target, silentArgs, L, done) {
     }
 }
 
-// HTTPS download tolérant aux certs self-signed (cas MeshCentral interne).
 function download(url, dest, cb) {
     var u;
     try { u = require('url').parse(url); } catch (e) { return cb('url invalide'); }
@@ -171,5 +183,3 @@ function rmRf(p) {
         try { fs.unlinkSync(p); } catch (e) {}
     }
 }
-
-module.exports = obj;
