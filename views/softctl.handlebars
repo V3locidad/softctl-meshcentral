@@ -214,7 +214,7 @@
       '<div class="actions"><button id="nhClose">Fermer</button></div>',
     ].join(''));
     bg.querySelector('#nhClose').onclick = function () { closeModal(bg); };
-    api('nodeHistory&nodeId=' + encodeURIComponent(nodeId)).then(function (r) {
+    api('nodeHistory', { nodeId: nodeId }).then(function (r) {
       var deps = r.deployments || [];
       if (!deps.length) {
         bg.querySelector('#nhBody').innerHTML = '<div class="empty">Aucun déploiement sur ce poste.</div>';
