@@ -557,6 +557,9 @@
       '<div id="wBody" style="max-height:50vh;overflow:auto;border:1px solid #eee;border-radius:4px;padding:4px">Chargement…</div>',
       '<div class="actions">',
       '  <span id="wCount" style="margin-right:auto;color:#666">0 sélectionné(s)</span>',
+      '  <label style="font-size:12px;color:#666;display:flex;align-items:center;gap:4px" title="Ajoute --force à winget. Utile pour réinstaller par-dessus une version posée hors winget (ex: Chrome MSI Google) afin que winget reprenne la main.">',
+      '    <input type="checkbox" id="wForce"> Forcer',
+      '  </label>',
       '  <button id="wUninstall">Désinstaller</button>',
       '  <button id="wUpgrade">⬆ Mettre à jour</button>',
       '  <button id="wInstall" class="primary">Installer</button>',
@@ -647,7 +650,8 @@
     };
 
     function dispatch(mode, btnSel) {
-      var body = { nodeIds: nodeIds, mode: mode };
+      var force = !!bg.querySelector('#wForce').checked;
+      var body = { nodeIds: nodeIds, mode: mode, force: force };
       var verb;
       if (mode === 'upgrade-all') {
         verb = 'mettre à jour TOUS les paquets';

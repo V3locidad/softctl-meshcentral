@@ -833,6 +833,7 @@ module.exports.softctl = function (parent) {
             let packageIds = Array.isArray(payload.packageIds) ? payload.packageIds : [];
             const nodeIds = Array.isArray(payload.nodeIds) ? payload.nodeIds : [];
             const mode = ['install','uninstall','upgrade','upgrade-all'].indexOf(payload.mode) !== -1 ? payload.mode : 'install';
+            const force = !!payload.force;
             if (!nodeIds.length) return sendJson(res, 400, { error: 'nodeIds requis' });
             // upgrade-all : pas de packageIds, on en fabrique un virtuel '*'
             // pour passer dans la boucle ci-dessous (un dispatch par node).
@@ -914,6 +915,7 @@ module.exports.softctl = function (parent) {
                         dispatchId: dispatchId,
                         packageId: pid,
                         mode: mode,
+                        force: force,
                     };
                     try {
                         ws.send(JSON.stringify(message));
