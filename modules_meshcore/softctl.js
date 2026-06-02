@@ -139,13 +139,14 @@ function doWingetInstall(data) {
     var log = [];
     function L(m) { log.push(m); dbg(m); }
 
-    function done(exit, err) {
+    function done(exit, err, skipped) {
         reply({
             pluginaction: 'installComplete',
             dispatchId: dispatchId,
             exit: (typeof exit === 'number') ? exit : -1,
             log: log.slice(-30).join('\n'),
             error: err ? String(err) : undefined,
+            skipped: !!skipped,
         });
     }
 
@@ -196,11 +197,13 @@ function doWingetInstall(data) {
                 L('exit ' + code);
                 // winget renvoie parfois 0x8A150011 (déjà installé) ou
                 // 0x8A15002B (no applicable upgrade) qu'on mappe en succès.
-                if (code === -1978335215 /* 0x8A150011 NO_APPLICABLE_INSTALLER déjà installé */) { L('déjà installé'); return done(0); }
-                if (code === -1978335189 /* 0x8A15002B NO_APPLICABLE_UPGRADE */) { L('aucune mise à jour applicable'); return done(0); }
-                if (code === -1978335212 /* 0x8A150014 NO_APPLICABLE_UPDATE_FOUND (upgrade --all) */) { L('rien à mettre à jour'); return done(0); }
-                if (code === -1978335138 /* 0x8A15005E UPDATE_NOT_APPLICABLE — paquet pas géré par winget (installé hors winget) */) { L('paquet non géré par winget (installé hors winget)'); return done(0); }
-                if (code === -1978335164 /* 0x8A150044 UPGRADE_VERSION_NOT_NEWER */) { L('déjà à la dernière version'); return done(0); }
+                // Codes "rien à faire" : on les remonte en 'skipped' (≠ succès)
+                // pour que l'UI affiche un état distinct au lieu de mentir avec OK.
+                if (code === -1978335215 /* 0x8A150011 NO_APPLICABLE_INSTALLER */) { L('déjà installé'); return done(code, 'déjà installé', true); }
+                if (code === -1978335189 /* 0x8A15002B NO_APPLICABLE_UPGRADE */)   { L('aucune mise à jour applicable'); return done(code, 'aucune mise à jour applicable', true); }
+                if (code === -1978335212 /* 0x8A150014 NO_APPLICABLE_UPDATE_FOUND */) { L('rien à mettre à jour'); return done(code, 'rien à mettre à jour', true); }
+                if (code === -1978335138 /* 0x8A15005E UPDATE_NOT_APPLICABLE */)   { L('paquet pas géré par winget'); return done(code, 'paquet installé hors winget — non mis à jour', true); }
+                if (code === -1978335164 /* 0x8A150044 UPGRADE_VERSION_NOT_NEWER */) { L('déjà à la dernière version'); return done(code, 'déjà à la dernière version', true); }
                 done(typeof code === 'number' ? code : -1);
             });
         } catch (e) {}

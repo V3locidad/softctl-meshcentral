@@ -41,6 +41,7 @@
   .resCell { padding: 3px 6px; border-radius: 3px; font-size: 11px; display: inline-block; min-width: 60px; text-align: center; }
   .resCell.success { background: #d4edda; color: #155724; }
   .resCell.fail    { background: #f8d7da; color: #721c24; }
+  .resCell.skipped { background: #ffe5b4; color: #7a4a00; }
   .resCell.pending { background: #fff3cd; color: #856404; }
   .resCell.offline { background: #e2e3e5; color: #383d41; }
   .rowActions { display: flex; gap: 4px; flex: 0 0 auto; opacity: 0; transition: opacity .1s; }
@@ -238,6 +239,7 @@
           var label = it.status || 'pending';
           if (it.status === 'success') { cls = 'success'; label = 'OK'; }
           else if (it.status === 'fail') { cls = 'fail'; label = 'KO (' + (it.exitCode != null ? it.exitCode : '?') + ')'; }
+          else if (it.status === 'skipped') { cls = 'skipped'; label = 'ignoré'; }
           else if (it.status === 'agent-offline') { cls = 'offline'; label = 'agent off'; }
           else if (it.status === 'dispatch-failed') { cls = 'fail'; label = 'dispatch KO'; }
           else if (it.status === 'cancelled') { cls = 'offline'; label = 'annulé'; }
@@ -400,6 +402,7 @@
   function statusLabel(st) {
     if (st === 'success') return 'OK';
     if (st === 'fail') return 'ÉCHEC';
+    if (st === 'skipped') return 'ignoré';
     if (st === 'agent-offline') return 'agent off';
     if (st === 'dispatch-failed') return 'dispatch KO';
     if (st === 'cancelled') return 'annulé';
@@ -408,6 +411,7 @@
   function statusClass(st) {
     if (st === 'success') return 'success';
     if (st === 'fail') return 'fail';
+    if (st === 'skipped') return 'skipped';
     if (st === 'agent-offline' || st === 'dispatch-failed' || st === 'cancelled') return 'offline';
     return 'pending';
   }
@@ -427,7 +431,7 @@
         if (!d) { $('preview').textContent = 'Déploiement introuvable.'; return; }
         renderDeployment(d);
         var allDone = Object.values(d.results || {}).every(function (x) {
-          return x.status === 'success' || x.status === 'fail' || x.status === 'agent-offline' || x.status === 'dispatch-failed' || x.status === 'cancelled';
+          return x.status === 'success' || x.status === 'fail' || x.status === 'skipped' || x.status === 'agent-offline' || x.status === 'dispatch-failed' || x.status === 'cancelled';
         });
         if (!allDone && (Date.now() - startedAt) < maxFollowMs && !currentFollow.stop) {
           setTimeout(tick, 5000);
@@ -511,6 +515,7 @@
              + '<div style="margin-top:4px">'
              +   '<span class="resCell success">' + c.success + ' OK</span> '
              +   '<span class="resCell fail">' + c.fail + ' KO</span> '
+             +   '<span class="resCell skipped">' + (c.skipped || 0) + ' ignoré</span> '
              +   '<span class="resCell pending">' + c.pending + ' attente</span> '
              +   '<span class="resCell offline">' + c.offline + ' off</span>'
              + '</div></div>';

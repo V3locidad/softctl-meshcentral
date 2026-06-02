@@ -224,7 +224,7 @@ module.exports.softctl = function (parent) {
             if (!dep) return;
             const key = entry.softId + '|' + entry.nodeId;
             dep.results[key] = {
-                status: (command.exit === 0) ? 'success' : 'fail',
+                status: command.skipped ? 'skipped' : ((command.exit === 0) ? 'success' : 'fail'),
                 exitCode: (typeof command.exit === 'number') ? command.exit : -1,
                 error: command.error || undefined,
                 log: command.log || undefined,
@@ -944,10 +944,11 @@ module.exports.softctl = function (parent) {
             const list = Object.values(deployments)
                 .sort((a, b) => b.timestamp - a.timestamp).slice(0, 50)
                 .map((d) => {
-                    const counts = { dispatched: 0, success: 0, fail: 0, pending: 0, offline: 0 };
+                    const counts = { dispatched: 0, success: 0, fail: 0, skipped: 0, pending: 0, offline: 0 };
                     Object.values(d.results || {}).forEach((r) => {
                         if (r.status === 'success') counts.success++;
                         else if (r.status === 'fail') counts.fail++;
+                        else if (r.status === 'skipped') counts.skipped++;
                         else if (r.status === 'agent-offline' || r.status === 'dispatch-failed') counts.offline++;
                         else counts.pending++;
                         counts.dispatched++;
