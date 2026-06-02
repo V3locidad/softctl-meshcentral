@@ -154,16 +154,18 @@ function runInstaller(target, silentArgs, L, done) {
             if (child.stdout) { child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += String(c); }); }
             if (child.stderr) { child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += String(c); }); }
         } catch (e) {}
-        // Polling non-bloquant via setTimeout récursif (setInterval n'est
-        // pas toujours fiable dans Duktape MeshAgent). On vérifie exitCode
-        // toutes les 3s, avec timeout dur de 30 min.
+        dbg('spawned, exitCode=' + child.exitCode);
+        // Polling rapide via setTimeout récursif. Intervalle court car msiexec
+        // peut sortir en quelques centaines de ms. Timeout dur 30 min.
         var maxMs = 30 * 60 * 1000;
         var elapsed = 0;
+        var step = 500;
         var finished = false;
         function tick() {
             if (finished) return;
-            elapsed += 3000;
-            dbg('tick ' + elapsed + 'ms exitCode=' + child.exitCode);
+            elapsed += step;
+            // log moins verbeux : seulement toutes les 10s
+            if (elapsed % 10000 === 0) dbg('tick ' + elapsed + 'ms exitCode=' + child.exitCode);
             if (typeof child.exitCode === 'number') {
                 finished = true;
                 try { if (child.stdout && child.stdout.str) L('stdout: ' + child.stdout.str.slice(-500)); } catch (e) {}
@@ -176,11 +178,10 @@ function runInstaller(target, silentArgs, L, done) {
                 L('timeout (30 min)');
                 done(-1, 'timeout');
             } else {
-                setTimeout(tick, 3000);
+                setTimeout(tick, step);
             }
         }
-        setTimeout(tick, 3000);
-        // Filet de sécurité : écoute aussi l'event 'exit' au cas où Duktape l'émet.
+        setTimeout(tick, step);
         try {
             child.on('exit', function (code) {
                 if (finished) return;
