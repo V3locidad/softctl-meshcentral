@@ -154,26 +154,42 @@ function runInstaller(target, silentArgs, L, done) {
             if (child.stdout) { child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += String(c); }); }
             if (child.stderr) { child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += String(c); }); }
         } catch (e) {}
-        // Polling non-bloquant : waitExit() gèle l'event loop de MeshAgent
-        // et déclenche le watchdog. On vérifie exitCode toutes les 2s,
-        // avec timeout dur de 30 min.
+        // Polling non-bloquant via setTimeout récursif (setInterval n'est
+        // pas toujours fiable dans Duktape MeshAgent). On vérifie exitCode
+        // toutes les 3s, avec timeout dur de 30 min.
         var maxMs = 30 * 60 * 1000;
         var elapsed = 0;
-        var poll = setInterval(function () {
-            elapsed += 2000;
+        var finished = false;
+        function tick() {
+            if (finished) return;
+            elapsed += 3000;
+            dbg('tick ' + elapsed + 'ms exitCode=' + child.exitCode);
             if (typeof child.exitCode === 'number') {
-                clearInterval(poll);
+                finished = true;
                 try { if (child.stdout && child.stdout.str) L('stdout: ' + child.stdout.str.slice(-500)); } catch (e) {}
                 try { if (child.stderr && child.stderr.str) L('stderr: ' + child.stderr.str.slice(-500)); } catch (e) {}
                 L('exit ' + child.exitCode);
                 done(child.exitCode);
             } else if (elapsed >= maxMs) {
-                clearInterval(poll);
+                finished = true;
                 try { child.kill(); } catch (e) {}
                 L('timeout (30 min)');
                 done(-1, 'timeout');
+            } else {
+                setTimeout(tick, 3000);
             }
-        }, 2000);
+        }
+        setTimeout(tick, 3000);
+        // Filet de sécurité : écoute aussi l'event 'exit' au cas où Duktape l'émet.
+        try {
+            child.on('exit', function (code) {
+                if (finished) return;
+                finished = true;
+                dbg('event exit ' + code);
+                L('exit ' + code);
+                done(typeof code === 'number' ? code : -1);
+            });
+        } catch (e) {}
     } catch (e) {
         L('spawn error: ' + e);
         done(-1, e);
