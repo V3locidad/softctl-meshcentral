@@ -149,48 +149,41 @@ function runInstaller(target, silentArgs, L, done) {
     }
     try {
         var child = cp.execFile(exe, argv);
-        // Capture stdout/stderr s'ils sont exposés (utile pour le log final).
-        try {
-            if (child.stdout) { child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += String(c); }); }
-            if (child.stderr) { child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += String(c); }); }
-        } catch (e) {}
-        dbg('spawned, exitCode=' + child.exitCode);
-        // Polling rapide via setTimeout récursif. Intervalle court car msiexec
-        // peut sortir en quelques centaines de ms. Timeout dur 30 min.
-        var maxMs = 30 * 60 * 1000;
-        var elapsed = 0;
-        var step = 500;
         var finished = false;
-        function tick() {
-            if (finished) return;
-            elapsed += step;
-            // log moins verbeux : seulement toutes les 10s
-            if (elapsed % 10000 === 0) dbg('tick ' + elapsed + 'ms exitCode=' + child.exitCode);
-            if (typeof child.exitCode === 'number') {
-                finished = true;
-                try { if (child.stdout && child.stdout.str) L('stdout: ' + child.stdout.str.slice(-500)); } catch (e) {}
-                try { if (child.stderr && child.stderr.str) L('stderr: ' + child.stderr.str.slice(-500)); } catch (e) {}
-                L('exit ' + child.exitCode);
-                done(child.exitCode);
-            } else if (elapsed >= maxMs) {
-                finished = true;
-                try { child.kill(); } catch (e) {}
-                L('timeout (30 min)');
-                done(-1, 'timeout');
-            } else {
-                setTimeout(tick, step);
-            }
-        }
-        setTimeout(tick, step);
+        // Listener exit AVANT toute autre opération — sinon on rate l'event
+        // si le process sort instantanément (cas msiexec qui délègue à un
+        // service Windows Installer et exit immédiatement).
         try {
             child.on('exit', function (code) {
                 if (finished) return;
                 finished = true;
                 dbg('event exit ' + code);
+                try { if (child.stdout && child.stdout.str) L('stdout: ' + String(child.stdout.str).slice(-500)); } catch (e) {}
+                try { if (child.stderr && child.stderr.str) L('stderr: ' + String(child.stderr.str).slice(-500)); } catch (e) {}
                 L('exit ' + code);
                 done(typeof code === 'number' ? code : -1);
             });
+        } catch (e) { dbg('on exit failed: ' + e); }
+        try {
+            if (child.stdout) { child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += String(c); }); }
+            if (child.stderr) { child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += String(c); }); }
         } catch (e) {}
+        dbg('spawned, exitCode=' + child.exitCode);
+        // Si déjà exited entre temps (race), on déclenche manuellement.
+        if (typeof child.exitCode === 'number' && !finished) {
+            finished = true;
+            L('exit (immédiat) ' + child.exitCode);
+            done(child.exitCode);
+            return;
+        }
+        // Timeout dur de sécurité : 30 min sans exit -> on kill.
+        setTimeout(function () {
+            if (finished) return;
+            finished = true;
+            try { child.kill(); } catch (e) {}
+            L('timeout (30 min)');
+            done(-1, 'timeout');
+        }, 30 * 60 * 1000);
     } catch (e) {
         L('spawn error: ' + e);
         done(-1, e);
