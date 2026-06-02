@@ -122,9 +122,17 @@ function runInstaller(target, silentArgs, L, done) {
     var exe;
     var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
     if (ext === 'msi') {
-        // MeshAgent execFile veut un chemin absolu.
+        // MeshAgent execFile veut un chemin absolu. Pour MSI, on force /qn
+        // /norestart : msiexec ne comprend pas /S (flag NSIS/InnoSetup).
+        // Si silentArgs ressemble à du msiexec (commence par /q…), on l'utilise.
         exe = windir + '\\System32\\msiexec.exe';
-        argv = ['/i', target].concat(silentArgs ? silentArgs.split(/\s+/).filter(Boolean) : []);
+        var msiArgs;
+        if (silentArgs && /^\s*\/q/i.test(silentArgs)) {
+            msiArgs = silentArgs.split(/\s+/).filter(Boolean);
+        } else {
+            msiArgs = ['/qn', '/norestart'];
+        }
+        argv = ['/i', target].concat(msiArgs);
         L('exec ' + exe + ' ' + argv.join(' '));
     } else {
         exe = target;
