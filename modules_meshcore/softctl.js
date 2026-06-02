@@ -138,8 +138,9 @@ function runInstaller(target, silentArgs, L, done) {
 }
 
 function download(url, dest, cb) {
-    var u;
-    try { u = require('url').parse(url); } catch (e) { return cb('url invalide'); }
+    // Parse manuel — MeshAgent (Duktape) n'a pas le module 'url' de Node.
+    var u = parseUrl(url);
+    if (!u) return cb('url invalide: ' + url);
     var mod = (u.protocol === 'https:') ? require('https') : require('http');
     var opts = {
         host: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80),
@@ -163,6 +164,18 @@ function download(url, dest, cb) {
     req.setTimeout(300000, function () { try { req.destroy(); } catch (e) {} finish(false, 'timeout'); });
     req.end();
     function finish(ok, err) { if (done) return; done = true; cb(ok ? null : (err || 'erreur')); }
+}
+
+function parseUrl(url) {
+    // ex: https://172.17.103.243/softctl-download/abc -> {protocol, hostname, port, path}
+    var m = /^(https?:)\/\/([^/:?#]+)(?::(\d+))?(\/.*)?$/i.exec(url);
+    if (!m) return null;
+    return {
+        protocol: m[1].toLowerCase(),
+        hostname: m[2],
+        port: m[3] ? parseInt(m[3], 10) : null,
+        path: m[4] || '/',
+    };
 }
 
 function mkdirP(p) {
