@@ -149,21 +149,27 @@ function download(url, dest, cb) {
     var fs = require('fs');
     var done = false;
     var ws = fs.createWriteStream(dest);
+    var to = null;
+    function finish(ok, err) {
+        if (done) return; done = true;
+        if (to) { try { clearTimeout(to); } catch (e) {} }
+        cb(ok ? null : (err || 'erreur'));
+    }
     var req = mod.request(opts, function (res) {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            res.resume(); finish(false, 'redirect non suivi (' + res.statusCode + ')'); return;
+            try { res.resume(); } catch (e) {} finish(false, 'redirect non suivi (' + res.statusCode + ')'); return;
         }
         if (res.statusCode !== 200) {
-            res.resume(); finish(false, 'HTTP ' + res.statusCode); return;
+            try { res.resume(); } catch (e) {} finish(false, 'HTTP ' + res.statusCode); return;
         }
         res.pipe(ws);
-        ws.on('finish', function () { ws.close(function () { finish(true); }); });
+        ws.on('finish', function () { try { ws.close(function () { finish(true); }); } catch (e) { finish(true); } });
         ws.on('error', function (e) { finish(false, String(e)); });
     });
     req.on('error', function (e) { finish(false, String(e)); });
-    req.setTimeout(300000, function () { try { req.destroy(); } catch (e) {} finish(false, 'timeout'); });
+    // MeshAgent (Duktape) n'a pas req.setTimeout — on simule via global setTimeout.
+    try { to = setTimeout(function () { try { req.end(); } catch (e) {} finish(false, 'timeout'); }, 600000); } catch (e) {}
     req.end();
-    function finish(ok, err) { if (done) return; done = true; cb(ok ? null : (err || 'erreur')); }
 }
 
 function parseUrl(url) {
