@@ -207,6 +207,34 @@ module.exports.softctl = function (parent) {
     // dont MC refuse les POST/PUT (CSRF-like). On utilise un token d'usage unique
     // pour gérer l'auth nous-mêmes — le token n'est délivré qu'à un user
     // authentifié via la route GET pluginadmin.
+    // Handler appelé par MeshCentral quand un agent envoie un message
+    // {action:'plugin', plugin:'softctl', pluginaction:'installComplete', ...}.
+    // C'est le retour d'install : on met à jour le déploiement et l'historique.
+    obj.serveraction = function (command, myparent) {
+        try {
+            if (!command || command.pluginaction !== 'installComplete') return;
+            const tok = command.dispatchId;
+            if (!tok) return;
+            const entry = reportTokens[tok];
+            if (!entry) return;  // déjà consommé ou expiré
+            delete reportTokens[tok];
+            const dep = deployments[entry.deploymentId];
+            if (!dep) return;
+            const key = entry.softId + '|' + entry.nodeId;
+            dep.results[key] = {
+                status: (command.exit === 0) ? 'success' : 'fail',
+                exitCode: (typeof command.exit === 'number') ? command.exit : -1,
+                error: command.error || undefined,
+                log: command.log || undefined,
+                time: Date.now(),
+            };
+            saveHistory();
+            console.log('softctl: installComplete ' + entry.softId + ' on ' + entry.nodeId + ' exit=' + command.exit);
+        } catch (e) {
+            console.log('softctl: serveraction error: ' + e.message);
+        }
+    };
+
     obj.server_startup = function () {
         const ws = obj.meshServer && obj.meshServer.webserver;
         const app = ws && ws.app;
@@ -579,87 +607,17 @@ module.exports.softctl = function (parent) {
                     const token = newDownloadToken(s.id);
                     // Route dédiée /softctl-download/<token>, hors pluginadmin.ashx.
                     const url = baseUrl + '/softctl-download/' + token;
-                    // Échappe pour insertion littérale dans la chaîne PS.
-                    const psEscape = (v) => String(v || '').replace(/'/g, "''");
-                    // Le PowerShell est entièrement encapsulé dans un try/finally
-                    // pour qu'on soit SÛR de toujours rapporter le résultat — même
-                    // si une étape (download, extract, install) plante. Les erreurs
-                    // sont aussi écrites dans un fichier softctl_log.txt à côté du
-                    // dossier temp pour qu'on puisse les inspecter sur le poste.
-                    const ps = [
-                        "$ErrorActionPreference = 'Stop'",
-                        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12",
-                        "try { [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true } } catch {}",
-                        "$url = '" + psEscape(url) + "'",
-                        "$installer = '" + psEscape(s.installer) + "'",
-                        "$silentArgs = '" + psEscape(s.silentArgs) + "'",
-                        "$archiveInstaller = '" + psEscape(s.archiveInstaller || '') + "'",
-                        "$logPath = Join-Path $env:TEMP ('softctl_log_' + (Get-Date -Format yyyyMMdd_HHmmss) + '.txt')",
-                        "$tmpDir = Join-Path $env:TEMP ('softctl_' + [System.Guid]::NewGuid().ToString('N'))",
-                        "$proc = $null",
-                        "function Log($m) { try { Add-Content -Path $logPath -Value (\"[$(Get-Date -Format HH:mm:ss)] $m\") } catch {} ; Write-Output $m }",
-                        "Log \"softctl start: $installer\"",
-                        "try {",
-                        "  New-Item -Path $tmpDir -ItemType Directory -Force | Out-Null",
-                        "  $download = Join-Path $tmpDir $installer",
-                        "  Log \"download from $url\"",
-                        "  Invoke-WebRequest -Uri $url -OutFile $download -UseBasicParsing",
-                        "  Log \"downloaded $((Get-Item $download).Length) bytes\"",
-                        "  $ext = [System.IO.Path]::GetExtension($installer).ToLower()",
-                        "  if ($ext -eq '.zip') {",
-                        "    if (-not $archiveInstaller) { throw 'archive sans archiveInstaller' }",
-                        "    $extractDir = Join-Path $tmpDir 'extract'",
-                        "    Log \"extracting to $extractDir\"",
-                        "    Expand-Archive -Path $download -DestinationPath $extractDir -Force",
-                        "    $target = Join-Path $extractDir $archiveInstaller",
-                        "    if (-not (Test-Path $target)) { throw \"installeur non trouvé dans l'archive: $archiveInstaller\" }",
-                        "    $tExt = [System.IO.Path]::GetExtension($target).ToLower()",
-                        "    Log \"running $target (silent=$silentArgs)\"",
-                        "    if ($tExt -eq '.msi') {",
-                        "      $msiArgs = \"/i `\"$target`\" \" + $silentArgs",
-                        "      $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -PassThru -Wait",
-                        "    } else {",
-                        "      if ($silentArgs) { $proc = Start-Process -FilePath $target -ArgumentList $silentArgs -PassThru -Wait -WorkingDirectory (Split-Path $target) }",
-                        "      else { $proc = Start-Process -FilePath $target -PassThru -Wait -WorkingDirectory (Split-Path $target) }",
-                        "    }",
-                        "  } elseif ($ext -eq '.msi') {",
-                        "    $msiArgs = \"/i `\"$download`\" \" + $silentArgs",
-                        "    Log \"running msiexec $msiArgs\"",
-                        "    $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -PassThru -Wait",
-                        "  } else {",
-                        "    Log \"running $download (silent=$silentArgs)\"",
-                        "    if ($silentArgs) { $proc = Start-Process -FilePath $download -ArgumentList $silentArgs -PassThru -Wait }",
-                        "    else { $proc = Start-Process -FilePath $download -PassThru -Wait }",
-                        "  }",
-                        "  Log \"exit code $($proc.ExitCode)\"",
-                        "} catch {",
-                        "  Log \"ERROR: $_\"",
-                        "} finally {",
-                        "  Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue",
-                        "}",
-                    ].join('\r\n');
 
                     nodeIds.forEach((nodeId) => {
                         const key = s.id + '|' + nodeId;
-                        // Token de retour : le PowerShell s'en sert pour appeler
-                        // reportResult une fois l'install terminée.
-                        const reportToken = crypto.randomBytes(16).toString('hex');
-                        reportTokens[reportToken] = {
+                        // dispatchId = identifiant retourné par l'agent dans
+                        // installComplete, qu'on stocke dans reportTokens pour
+                        // retrouver le déploiement à la réception.
+                        const dispatchId = crypto.randomBytes(16).toString('hex');
+                        reportTokens[dispatchId] = {
                             deploymentId: deploymentId, softId: s.id, nodeId: nodeId,
                             expires: Date.now() + REPORT_TTL_MS,
                         };
-                        const reportUrl = baseUrl + '/softctl-report/' + reportToken;
-                        // Petit suffixe PS qui poste le résultat. On l'append au
-                        // script principal et on s'arrange pour qu'il s'exécute
-                        // même si l'install échoue (try/finally).
-                        const reportPs = '\r\n' + [
-                            "$__reportBase = '" + psEscape(reportUrl) + "'",
-                            "$__exit = if ($proc) { $proc.ExitCode } else { -1 }",
-                            "try {",
-                            "  $u = $__reportBase + '&exit=' + $__exit",
-                            "  [void](Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 10)",
-                            "} catch {}",
-                        ].join('\r\n');
 
                         const ws = wsagents[nodeId];
                         if (!ws || typeof ws.send !== 'function') {
@@ -667,10 +625,6 @@ module.exports.softctl = function (parent) {
                             deployment.results[key] = { status: 'agent-offline', time: Date.now() };
                             return;
                         }
-                        // Garde-fou : on ne fait confiance qu'à ce que le WebSocket
-                        // déclare comme node cible. Si MC indexe mal wsagents et que
-                        // ws.dbNodeKey pointe ailleurs, on refuse plutôt que de
-                        // pousser un install sur le mauvais poste.
                         const targetKey = ws.dbNodeKey || ws.nodeid || nodeId;
                         if (targetKey !== nodeId) {
                             console.log('softctl: REJET dispatch ' + nodeId + ' — wsagent.dbNodeKey=' + targetKey);
@@ -678,45 +632,30 @@ module.exports.softctl = function (parent) {
                             deployment.results[key] = { status: 'dispatch-failed', error: 'wsagent ciblage incohérent', time: Date.now() };
                             return;
                         }
-                        // Encode le script PS en UTF-16LE puis base64. Évite tout
-                        // problème de quoting côté agent.
-                        const psFull = ps + reportPs;
-                        const psB64 = Buffer.from(psFull, 'utf16le').toString('base64');
-                        const cmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + psB64;
+
+                        // Canal plugin : MC pousse modules_meshcore/softctl.js sur
+                        // l'agent au démarrage. L'agent reçoit ce message et appelle
+                        // notre obj.serveraction côté meshcore qui télécharge +
+                        // installe + répond avec installComplete.
                         const message = {
-                            action: 'runcommands',
-                            type: 1,                   // 1 = cmd shell
-                            cmds: cmd,
-                            runAsUser: 0,              // 0 = LocalSystem
-                            reply: false,
-                            responseid: crypto.randomBytes(8).toString('hex'),
+                            action: 'plugin',
+                            plugin: 'softctl',
+                            pluginaction: 'install',
+                            dispatchId: dispatchId,
+                            url: url,
+                            installer: s.installer,
+                            silentArgs: s.silentArgs || '',
+                            archiveInstaller: s.archiveInstaller || '',
                         };
-                        // Stratégie multi-essais :
-                        //  1) ws.send(object) — certaines versions MC acceptent un objet
-                        //  2) ws.send(stringJSON) — la plus standard
-                        //  3) webserver.routeAgentCommand(...) — API interne MC
-                        const ws2 = obj.meshServer.webserver;
-                        let sent = false, via = '';
-                        const tryOne = (label, fn) => {
-                            if (sent) return;
-                            try { fn(); sent = true; via = label; }
-                            catch (e) { console.log('softctl: ' + label + ' KO: ' + e.message); }
-                        };
-                        tryOne('routeAgentCommand', () => {
-                            if (typeof ws2.routeAgentCommand !== 'function') throw new Error('méthode absente');
-                            const full = Object.assign({}, message, { nodeids: [nodeId] });
-                            ws2.routeAgentCommand(full, obj.meshServer.config && obj.meshServer.config.domains && obj.meshServer.config.domains[''], ws);
-                        });
-                        tryOne('ws.send(object)', () => { ws.send(message); });
-                        tryOne('ws.send(string)', () => { ws.send(JSON.stringify(message)); });
-                        if (sent) {
-                            console.log('softctl: dispatched ' + s.id + ' -> ' + nodeId + ' via ' + via + ' (cmd len=' + cmd.length + ')');
-                            results.push({ softId: s.id, nodeId: nodeId, ok: true, via: via });
-                            deployment.results[key] = { status: 'dispatched', via: via, time: Date.now() };
-                        } else {
-                            console.log('softctl: tous les chemins de dispatch ont échoué pour ' + nodeId);
-                            results.push({ softId: s.id, nodeId: nodeId, ok: false, error: 'aucun dispatch méthode disponible' });
-                            deployment.results[key] = { status: 'dispatch-failed', error: 'aucun chemin viable', time: Date.now() };
+                        try {
+                            ws.send(JSON.stringify(message));
+                            console.log('softctl: install dispatched ' + s.id + ' -> ' + nodeId + ' dispatchId=' + dispatchId);
+                            results.push({ softId: s.id, nodeId: nodeId, ok: true });
+                            deployment.results[key] = { status: 'dispatched', time: Date.now() };
+                        } catch (e) {
+                            console.log('softctl: dispatch failed for ' + nodeId + ': ' + e.message);
+                            results.push({ softId: s.id, nodeId: nodeId, ok: false, error: e.message });
+                            deployment.results[key] = { status: 'dispatch-failed', error: e.message, time: Date.now() };
                         }
                     });
                 });
