@@ -54,6 +54,11 @@ function consoleaction(args, rights, sessionid, parent) {
     }
 }
 
+// Expose consoleaction via module.exports comme les modules meshcore natifs.
+// ScriptTask s'en passe (les noms top-level passent), mais on évite tout
+// doute sur la résolution de require('softctl').consoleaction.
+module.exports = { consoleaction: consoleaction };
+
 function doInstall(data) {
     var fs = require('fs');
     var cp = require('child_process');
