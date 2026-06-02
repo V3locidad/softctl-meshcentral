@@ -29,6 +29,8 @@
   .row .main { flex: 1; }
   .row .main .title { font-weight: 500; }
   .row .main .sub { color: #888; font-size: 11px; }
+  .row .histBtn { flex: 0 0 auto; font-size: 11px; padding: 2px 8px; border: 1px solid #cfd5db; background: #f6f8fa; border-radius: 3px; cursor: pointer; }
+  .row .histBtn:hover { background: #e9eef3; }
   .empty { color: #aaa; font-style: italic; padding: 12px; }
   #deployBar { margin-top: 10px; padding: 8px; background: #f4f4f4; border: 1px solid #ddd; border-radius: 4px; display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
   #deployBar .info { flex: 1; }
@@ -191,9 +193,53 @@
            +       (a.arch ? '<span class="badgeArch">' + escapeHtml(a.arch) + '</span>' : '')
            +     '</div>'
            +   '</div>'
+           +   '<button class="histBtn" data-node="' + escapeHtml(a.id) + '" data-name="' + escapeHtml(a.name) + '" title="Voir l\'historique des déploiements sur ce poste">Historique</button>'
            + '</div>';
     }).join('');
     bindRowToggle('agentList', agentSel, renderAgents);
+    // Bouton "Historique" par ligne — stoppe la propagation pour ne pas
+    // toggle la sélection de l'agent.
+    [].slice.call(document.querySelectorAll('#agentList .histBtn')).forEach(function (btn) {
+      btn.onclick = function (ev) {
+        ev.stopPropagation();
+        openNodeHistory(btn.getAttribute('data-node'), btn.getAttribute('data-name'));
+      };
+    });
+  }
+
+  function openNodeHistory(nodeId, nodeName) {
+    var bg = showModal([
+      '<h3>Historique — ' + escapeHtml(nodeName || nodeId) + '</h3>',
+      '<div id="nhBody">Chargement…</div>',
+      '<div class="actions"><button id="nhClose">Fermer</button></div>',
+    ].join(''));
+    bg.querySelector('#nhClose').onclick = function () { closeModal(bg); };
+    api('nodeHistory&nodeId=' + encodeURIComponent(nodeId)).then(function (r) {
+      var deps = r.deployments || [];
+      if (!deps.length) {
+        bg.querySelector('#nhBody').innerHTML = '<div class="empty">Aucun déploiement sur ce poste.</div>';
+        return;
+      }
+      var html = deps.map(function (d) {
+        var when = new Date(d.timestamp).toLocaleString();
+        var items = (d.items || []).map(function (it) {
+          var cls = 'pending';
+          var label = it.status || 'pending';
+          if (it.status === 'success') { cls = 'success'; label = 'OK'; }
+          else if (it.status === 'fail') { cls = 'fail'; label = 'KO (' + (it.exitCode != null ? it.exitCode : '?') + ')'; }
+          else if (it.status === 'agent-offline') { cls = 'offline'; label = 'agent off'; }
+          else if (it.status === 'dispatch-failed') { cls = 'fail'; label = 'dispatch KO'; }
+          else if (it.status === 'cancelled') { cls = 'offline'; label = 'annulé'; }
+          else if (it.status === 'dispatched') { cls = 'pending'; label = 'envoyé'; }
+          return '<div style="margin-top:2px"><span class="resCell ' + cls + '">' + escapeHtml(label) + '</span> ' + escapeHtml(it.softName || it.softId) + '</div>';
+        }).join('');
+        return '<div style="padding:8px;border-bottom:1px solid #eee">'
+             +   '<div><b>' + escapeHtml(when) + '</b> · par ' + escapeHtml(d.user || '?') + '</div>'
+             +   items
+             + '</div>';
+      }).join('');
+      bg.querySelector('#nhBody').innerHTML = html;
+    });
   }
 
   function renderMeshSelect() {

@@ -797,6 +797,31 @@ module.exports.softctl = function (parent) {
             return;
         }
 
+        if (action === 'nodeHistory') {
+            // Historique des déploiements ayant ciblé un node donné.
+            // Renvoie pour chaque déploiement : date, user, soft(s), status pour ce node.
+            const nodeId = String(req.query.nodeId || '');
+            if (!nodeId) return sendJson(res, 400, { error: 'nodeId requis' });
+            const list = Object.values(deployments)
+                .filter((d) => (d.nodes || []).some((n) => n.id === nodeId))
+                .sort((a, b) => b.timestamp - a.timestamp)
+                .slice(0, 100)
+                .map((d) => {
+                    const items = (d.softs || []).map((s) => {
+                        const key = s.id + '|' + nodeId;
+                        const r = (d.results || {})[key] || { status: 'pending' };
+                        return {
+                            softId: s.id, softName: s.name,
+                            status: r.status, exitCode: r.exitCode,
+                            error: r.error,
+                        };
+                    });
+                    return { id: d.id, timestamp: d.timestamp, user: d.user, items: items };
+                });
+            sendJson(res, 200, { deployments: list });
+            return;
+        }
+
         if (action === 'dryRun') {
             // Aperçu sans rien envoyer. GET avec payload=… (JSON encodé).
             try {
