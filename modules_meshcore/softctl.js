@@ -150,24 +150,34 @@ function download(url, dest, cb) {
     var done = false;
     var ws = fs.createWriteStream(dest);
     var to = null;
+    var bytes = 0;
     function finish(ok, err) {
         if (done) return; done = true;
         if (to) { try { clearTimeout(to); } catch (e) {} }
+        try { ws.end(); } catch (e) {}
         cb(ok ? null : (err || 'erreur'));
     }
+    dbg('download: request ' + u.hostname + ':' + opts.port + ' ' + u.path);
     var req = mod.request(opts, function (res) {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        dbg('download: response status=' + res.statusCode);
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers && res.headers.location) {
             try { res.resume(); } catch (e) {} finish(false, 'redirect non suivi (' + res.statusCode + ')'); return;
         }
         if (res.statusCode !== 200) {
             try { res.resume(); } catch (e) {} finish(false, 'HTTP ' + res.statusCode); return;
         }
-        res.pipe(ws);
-        ws.on('finish', function () { try { ws.close(function () { finish(true); }); } catch (e) { finish(true); } });
-        ws.on('error', function (e) { finish(false, String(e)); });
+        // Pas de res.pipe fiable côté MeshAgent — on lit les chunks à la main.
+        res.on('data', function (chunk) {
+            bytes += chunk.length;
+            try { ws.write(chunk); } catch (e) { dbg('write err: ' + e); }
+        });
+        res.on('end', function () {
+            dbg('download: end (' + bytes + ' octets)');
+            try { ws.end(function () { finish(true); }); } catch (e) { finish(true); }
+        });
+        res.on('error', function (e) { dbg('res error: ' + e); finish(false, 'res: ' + e); });
     });
-    req.on('error', function (e) { finish(false, String(e)); });
-    // MeshAgent (Duktape) n'a pas req.setTimeout — on simule via global setTimeout.
+    req.on('error', function (e) { dbg('req error: ' + e); finish(false, 'req: ' + e); });
     try { to = setTimeout(function () { try { req.end(); } catch (e) {} finish(false, 'timeout'); }, 600000); } catch (e) {}
     req.end();
 }
