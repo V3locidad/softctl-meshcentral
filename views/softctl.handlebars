@@ -539,21 +539,44 @@
     }
     var bg = showModal([
       '<h3>📦 Catalogue Winget <span class="pill">' + nodeIds.length + ' poste(s)</span></h3>',
-      '<div style="font-size:12px;color:#666;margin:0 0 8px 0">Installation silencieuse via winget (Windows 10 1809+/Windows 11). Pas besoin de fichier — l\'agent télécharge depuis le dépôt Microsoft.</div>',
-      '<div class="search"><input type="text" id="wFilter" placeholder="Filtrer…"></div>',
-      '<div id="wBody" style="max-height:55vh;overflow:auto;border:1px solid #eee;border-radius:4px;padding:4px">Chargement…</div>',
+      '<div style="font-size:12px;color:#666;margin:0 0 8px 0">Installation silencieuse via winget (Windows 10 1809+/Windows 11). Sources : catalogue local + recherche en ligne (dépôt Microsoft).</div>',
+      '<div style="display:flex;gap:6px;margin:0 0 6px 0">',
+      '  <button id="wTabLocal" class="primary" style="flex:1">📚 Catalogue</button>',
+      '  <button id="wTabSearch" style="flex:1">🔎 Recherche en ligne</button>',
+      '  <button id="wUpgradeAll" style="background:#fff3cd;border-color:#ffe69c">⬆ Tout mettre à jour</button>',
+      '</div>',
+      '<div class="search"><input type="text" id="wFilter" placeholder="Filtrer le catalogue…"></div>',
+      '<div id="wSearchBar" style="display:none;margin-bottom:4px">',
+      '  <input type="text" id="wSearch" placeholder="Rechercher (ex: spotify, vscode, gimp…)" style="width:100%;padding:5px;border:1px solid #bbb;border-radius:3px;font-size:13px">',
+      '</div>',
+      '<div id="wBody" style="max-height:50vh;overflow:auto;border:1px solid #eee;border-radius:4px;padding:4px">Chargement…</div>',
       '<div class="actions">',
       '  <span id="wCount" style="margin-right:auto;color:#666">0 sélectionné(s)</span>',
       '  <button id="wUninstall">Désinstaller</button>',
+      '  <button id="wUpgrade">⬆ Mettre à jour</button>',
       '  <button id="wInstall" class="primary">Installer</button>',
       '  <button id="wClose">Fermer</button>',
       '</div>',
     ].join(''));
 
-    var sel = {};
-    var allApps = [];
+    var sel = {};       // packageId -> { id, name } (préserve le nom même quand l'élément quitte la liste)
+    var allApps = [];   // catalogue local
+    var searchHits = [];// derniers résultats recherche en ligne
+    var tab = 'local';
+    var searchTimer = null;
 
-    function renderList() {
+    function bindCheckboxes() {
+      [].slice.call(bg.querySelectorAll('#wBody input[type=checkbox]')).forEach(function (cb) {
+        cb.onchange = function () {
+          var pkg = cb.getAttribute('data-pkg');
+          var name = cb.getAttribute('data-name') || pkg;
+          if (cb.checked) sel[pkg] = { id: pkg, name: name }; else delete sel[pkg];
+          bg.querySelector('#wCount').textContent = Object.keys(sel).length + ' sélectionné(s)';
+        };
+      });
+    }
+
+    function renderLocal() {
       var f = (bg.querySelector('#wFilter').value || '').trim().toLowerCase();
       var html = allApps.map(function (cat) {
         var apps = cat.apps.filter(function (a) {
@@ -565,33 +588,78 @@
           + apps.map(function (a) {
             var checked = sel[a.id] ? ' checked' : '';
             return '<label style="display:block;padding:3px 6px;cursor:pointer">'
-              + '<input type="checkbox" data-pkg="' + escapeHtml(a.id) + '"' + checked + '> '
+              + '<input type="checkbox" data-pkg="' + escapeHtml(a.id) + '" data-name="' + escapeHtml(a.name) + '"' + checked + '> '
               + escapeHtml(a.name)
               + ' <span style="color:#999;font-size:11px">' + escapeHtml(a.id) + '</span></label>';
           }).join('');
       }).join('');
       bg.querySelector('#wBody').innerHTML = html || '<div class="empty">Aucun résultat.</div>';
-      [].slice.call(bg.querySelectorAll('#wBody input[type=checkbox]')).forEach(function (cb) {
-        cb.onchange = function () {
-          var pkg = cb.getAttribute('data-pkg');
-          if (cb.checked) sel[pkg] = true; else delete sel[pkg];
-          bg.querySelector('#wCount').textContent = Object.keys(sel).length + ' sélectionné(s)';
-        };
+      bindCheckboxes();
+    }
+
+    function renderSearch() {
+      var rows = searchHits.map(function (a) {
+        var checked = sel[a.id] ? ' checked' : '';
+        return '<label style="display:block;padding:4px 6px;border-bottom:1px solid #f3f3f3;cursor:pointer">'
+          + '<input type="checkbox" data-pkg="' + escapeHtml(a.id) + '" data-name="' + escapeHtml(a.name) + '"' + checked + '> '
+          + '<b>' + escapeHtml(a.name) + '</b>'
+          + (a.version ? ' <span style="color:#666">' + escapeHtml(a.version) + '</span>' : '')
+          + ' <span style="color:#999;font-size:11px">' + escapeHtml(a.id) + '</span>'
+          + (a.publisher ? '<div style="color:#888;font-size:11px;margin-left:22px">' + escapeHtml(a.publisher) + '</div>' : '')
+          + '</label>';
+      }).join('');
+      bg.querySelector('#wBody').innerHTML = rows || '<div class="empty">Tape au moins 2 caractères.</div>';
+      bindCheckboxes();
+    }
+
+    function doSearch() {
+      var q = (bg.querySelector('#wSearch').value || '').trim();
+      if (q.length < 2) { searchHits = []; renderSearch(); return; }
+      bg.querySelector('#wBody').innerHTML = '<div class="empty">Recherche…</div>';
+      api('wingetSearch', { q: q }).then(function (r) {
+        if (r.error) { bg.querySelector('#wBody').innerHTML = '<div class="empty" style="color:#721c24">' + escapeHtml(r.error) + '</div>'; return; }
+        searchHits = r.results || [];
+        renderSearch();
       });
     }
 
-    bg.querySelector('#wClose').onclick = function () { closeModal(bg); };
-    bg.querySelector('#wFilter').oninput = renderList;
+    function switchTab(which) {
+      tab = which;
+      bg.querySelector('#wTabLocal').className = (which === 'local') ? 'primary' : '';
+      bg.querySelector('#wTabSearch').className = (which === 'search') ? 'primary' : '';
+      bg.querySelector('#wFilter').parentNode.style.display = (which === 'local') ? '' : 'none';
+      bg.querySelector('#wSearchBar').style.display = (which === 'search') ? '' : 'none';
+      if (which === 'local') renderLocal(); else { searchHits = []; renderSearch(); bg.querySelector('#wSearch').focus(); }
+    }
 
-    function dispatch(mode) {
-      var pkgs = Object.keys(sel);
-      if (!pkgs.length) { alert('Sélectionne au moins une app.'); return; }
-      var verb = (mode === 'uninstall') ? 'désinstaller' : 'installer';
-      if (!confirm('Confirmer : ' + verb + ' ' + pkgs.length + ' app(s) sur ' + nodeIds.length + ' poste(s) ?')) return;
-      var btn = bg.querySelector(mode === 'uninstall' ? '#wUninstall' : '#wInstall');
+    bg.querySelector('#wClose').onclick = function () { closeModal(bg); };
+    bg.querySelector('#wFilter').oninput = renderLocal;
+    bg.querySelector('#wTabLocal').onclick = function () { switchTab('local'); };
+    bg.querySelector('#wTabSearch').onclick = function () { switchTab('search'); };
+    bg.querySelector('#wSearch').oninput = function () {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(doSearch, 500);
+    };
+
+    function dispatch(mode, btnSel) {
+      var body = { nodeIds: nodeIds, mode: mode };
+      var verb;
+      if (mode === 'upgrade-all') {
+        verb = 'mettre à jour TOUS les paquets';
+      } else {
+        var pkgs = Object.keys(sel);
+        if (!pkgs.length) { alert('Sélectionne au moins une app.'); return; }
+        body.packageIds = pkgs;
+        verb = (mode === 'uninstall') ? 'désinstaller'
+             : (mode === 'upgrade') ? 'mettre à jour'
+             : 'installer';
+        verb += ' ' + pkgs.length + ' app(s)';
+      }
+      if (!confirm('Confirmer : ' + verb + ' sur ' + nodeIds.length + ' poste(s) ?')) return;
+      var btn = bg.querySelector(btnSel);
       var prev = btn.textContent;
       btn.disabled = true; btn.textContent = 'Envoi…';
-      api('wingetDeploy', null, { packageIds: pkgs, nodeIds: nodeIds, mode: mode }).then(function (r) {
+      api('wingetDeploy', null, body).then(function (r) {
         btn.disabled = false; btn.textContent = prev;
         if (r.error) { alert('Erreur : ' + r.error); return; }
         closeModal(bg);
@@ -601,8 +669,10 @@
         alert('Erreur : ' + e);
       });
     }
-    bg.querySelector('#wInstall').onclick = function () { dispatch('install'); };
-    bg.querySelector('#wUninstall').onclick = function () { dispatch('uninstall'); };
+    bg.querySelector('#wInstall').onclick    = function () { dispatch('install',     '#wInstall'); };
+    bg.querySelector('#wUninstall').onclick  = function () { dispatch('uninstall',   '#wUninstall'); };
+    bg.querySelector('#wUpgrade').onclick    = function () { dispatch('upgrade',     '#wUpgrade'); };
+    bg.querySelector('#wUpgradeAll').onclick = function () { dispatch('upgrade-all', '#wUpgradeAll'); };
 
     api('wingetCatalog').then(function (r) {
       if (r.error) { bg.querySelector('#wBody').innerHTML = '<div class="empty" style="color:#721c24">' + escapeHtml(r.error) + '</div>'; return; }

@@ -134,7 +134,8 @@ function doWingetInstall(data) {
     var cp = require('child_process');
     var dispatchId = data.dispatchId;
     var packageId = data.packageId;
-    var mode = (data.mode === 'uninstall') ? 'uninstall' : 'install';
+    var modes = { install:1, uninstall:1, upgrade:1, 'upgrade-all':1 };
+    var mode = modes[data.mode] ? data.mode : 'install';
     var log = [];
     function L(m) { log.push(m); dbg(m); }
 
@@ -148,7 +149,7 @@ function doWingetInstall(data) {
         });
     }
 
-    if (!packageId) return done(-1, 'packageId manquant');
+    if (mode !== 'upgrade-all' && !packageId) return done(-1, 'packageId manquant');
 
     var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
     var programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
@@ -170,10 +171,19 @@ function doWingetInstall(data) {
     // On enveloppe dans cmd.exe /c pour les mêmes raisons que runInstaller
     // (MeshAgent en service bloque les stdio des process lancés direct).
     var exe = windir + '\\System32\\cmd.exe';
-    var verb = (mode === 'uninstall') ? 'uninstall' : 'install';
-    var cmdLine = '"' + wingetExe + '" ' + verb + ' --id ' + packageId
-        + ' --exact --silent --accept-source-agreements --accept-package-agreements'
-        + (mode === 'install' ? ' --scope machine' : '');
+    var verb = (mode === 'uninstall') ? 'uninstall'
+             : (mode === 'upgrade' || mode === 'upgrade-all') ? 'upgrade'
+             : 'install';
+    var cmdLine = '"' + wingetExe + '" ' + verb;
+    if (mode === 'upgrade-all') {
+        cmdLine += ' --all --include-unknown';
+    } else {
+        cmdLine += ' --id ' + packageId + ' --exact';
+    }
+    cmdLine += ' --silent --accept-source-agreements --accept-package-agreements';
+    // --scope machine n'est dispo qu'à l'install. upgrade hérite du scope
+    // d'origine, uninstall n'en a pas besoin.
+    if (mode === 'install') cmdLine += ' --scope machine';
     var argv = ['/c', cmdLine + ' >nul 2>nul'];
     L('exec cmd /c ' + cmdLine);
     try {
@@ -186,7 +196,9 @@ function doWingetInstall(data) {
                 L('exit ' + code);
                 // winget renvoie parfois 0x8A150011 (déjà installé) ou
                 // 0x8A15002B (no applicable upgrade) qu'on mappe en succès.
-                if (code === -1978335215 /* 0x8A150011 */) { L('déjà installé'); return done(0); }
+                if (code === -1978335215 /* 0x8A150011 NO_APPLICABLE_INSTALLER déjà installé */) { L('déjà installé'); return done(0); }
+                if (code === -1978335189 /* 0x8A15002B NO_APPLICABLE_UPGRADE */) { L('aucune mise à jour applicable'); return done(0); }
+                if (code === -1978335212 /* 0x8A150014 NO_APPLICABLE_UPDATE_FOUND (upgrade --all) */) { L('rien à mettre à jour'); return done(0); }
                 done(typeof code === 'number' ? code : -1);
             });
         } catch (e) {}

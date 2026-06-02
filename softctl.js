@@ -786,16 +786,58 @@ module.exports.softctl = function (parent) {
             return;
         }
 
+        if (action === 'wingetSearch') {
+            // Recherche en ligne dans le dépôt winget public. On passe par
+            // l'API communautaire api.winget.run qui sert d'index public au
+            // dépôt Microsoft (utilisée par winstall.app, etc.). On la
+            // requête côté serveur (pas de CORS, et l'agent n'a pas besoin
+            // d'être online pour l'index).
+            const q = String((req.query && req.query.q) || '').trim();
+            if (q.length < 2) return sendJson(res, 400, { error: 'requête trop courte (min 2 caractères)' });
+            const https = require('https');
+            const opts = {
+                host: 'api.winget.run',
+                path: '/v2/packages?query=' + encodeURIComponent(q) + '&take=40',
+                headers: { 'User-Agent': 'softctl-meshcentral', 'Accept': 'application/json' },
+                timeout: 8000,
+            };
+            const reqWg = https.get(opts, (r) => {
+                let buf = '';
+                r.on('data', (c) => { buf += c; });
+                r.on('end', () => {
+                    try {
+                        const data = JSON.parse(buf);
+                        const arr = (data && (data.Packages || data.packages)) || [];
+                        const list = arr.map((p) => ({
+                            id: p.Id || p.id || '',
+                            name: (p.Latest && p.Latest.Name) || p.Name || p.id || '',
+                            publisher: (p.Latest && p.Latest.Publisher) || p.Publisher || '',
+                            version: (p.Latest && p.Latest.Version) || p.Version || '',
+                            description: (p.Latest && p.Latest.Description) || '',
+                        })).filter((x) => x.id);
+                        sendJson(res, 200, { results: list });
+                    } catch (e) { sendJson(res, 502, { error: 'réponse invalide: ' + e.message }); }
+                });
+            });
+            reqWg.on('timeout', () => { try { reqWg.destroy(); } catch (_) {} sendJson(res, 504, { error: 'timeout api.winget.run' }); });
+            reqWg.on('error', (e) => sendJson(res, 502, { error: 'api.winget.run: ' + e.message }));
+            return;
+        }
+
         if (action === 'wingetDeploy') {
             // Déploiement winget : on réutilise toute la machinerie de tracking
             // existante (deployments + reportTokens + installComplete). Chaque
             // package est représenté comme un "soft" virtuel d'id 'winget:<pkg>'
             // pour que l'historique et le polling UI fonctionnent à l'identique.
             const payload = readJsonParam(req);
-            const packageIds = Array.isArray(payload.packageIds) ? payload.packageIds : [];
+            let packageIds = Array.isArray(payload.packageIds) ? payload.packageIds : [];
             const nodeIds = Array.isArray(payload.nodeIds) ? payload.nodeIds : [];
-            const mode = (payload.mode === 'uninstall') ? 'uninstall' : 'install';
-            if (!packageIds.length || !nodeIds.length) return sendJson(res, 400, { error: 'packageIds et nodeIds requis' });
+            const mode = ['install','uninstall','upgrade','upgrade-all'].indexOf(payload.mode) !== -1 ? payload.mode : 'install';
+            if (!nodeIds.length) return sendJson(res, 400, { error: 'nodeIds requis' });
+            // upgrade-all : pas de packageIds, on en fabrique un virtuel '*'
+            // pour passer dans la boucle ci-dessous (un dispatch par node).
+            if (mode === 'upgrade-all') packageIds = ['*'];
+            else if (!packageIds.length) return sendJson(res, 400, { error: 'packageIds requis' });
 
             // Charge le catalogue pour récupérer le nom lisible de chaque app.
             let nameById = {};
@@ -832,17 +874,21 @@ module.exports.softctl = function (parent) {
                 id: deploymentId,
                 timestamp: Date.now(),
                 user: userName,
-                softs: packageIds.map((pid) => ({
-                    id: 'winget:' + pid,
-                    name: (mode === 'uninstall' ? '[winget × ] ' : '[winget] ') + (nameById[pid] || pid),
-                })),
+                softs: packageIds.map((pid) => {
+                    const prefix = (mode === 'uninstall') ? '[winget × ] '
+                                 : (mode === 'upgrade') ? '[winget ↑] '
+                                 : (mode === 'upgrade-all') ? '[winget ↑ all] '
+                                 : '[winget] ';
+                    const label = (pid === '*') ? 'tous les paquets' : (nameById[pid] || pid);
+                    return { id: 'winget:' + pid + ':' + mode, name: prefix + label };
+                }),
                 nodes: nodeIds.map((id) => ({ id: id, name: nodeNames[id] || '' })),
                 results: {},
             };
 
             const results = [];
             packageIds.forEach((pid) => {
-                const virtSoftId = 'winget:' + pid;
+                const virtSoftId = 'winget:' + pid + ':' + mode;
                 nodeIds.forEach((nodeId) => {
                     const key = virtSoftId + '|' + nodeId;
                     const dispatchId = crypto.randomBytes(16).toString('hex');
