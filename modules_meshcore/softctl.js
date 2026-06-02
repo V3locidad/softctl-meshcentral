@@ -199,6 +199,8 @@ function doWingetInstall(data) {
                 if (code === -1978335215 /* 0x8A150011 NO_APPLICABLE_INSTALLER déjà installé */) { L('déjà installé'); return done(0); }
                 if (code === -1978335189 /* 0x8A15002B NO_APPLICABLE_UPGRADE */) { L('aucune mise à jour applicable'); return done(0); }
                 if (code === -1978335212 /* 0x8A150014 NO_APPLICABLE_UPDATE_FOUND (upgrade --all) */) { L('rien à mettre à jour'); return done(0); }
+                if (code === -1978335138 /* 0x8A15005E UPDATE_NOT_APPLICABLE — paquet pas géré par winget (installé hors winget) */) { L('paquet non géré par winget (installé hors winget)'); return done(0); }
+                if (code === -1978335164 /* 0x8A150044 UPGRADE_VERSION_NOT_NEWER */) { L('déjà à la dernière version'); return done(0); }
                 done(typeof code === 'number' ? code : -1);
             });
         } catch (e) {}
