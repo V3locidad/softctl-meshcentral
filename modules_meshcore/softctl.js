@@ -99,13 +99,12 @@ function doInstall(data) {
             var tarExe = (process.env.windir || process.env.WINDIR || 'C:\\Windows') + '\\System32\\tar.exe';
             try {
                 var tarChild = cp.execFile(tarExe, ['-xf', downloadPath, '-C', extractDir]);
-                tarChild.on('exit', function (code) {
-                    if (code !== 0) { L('tar exit ' + code); return done(-1, 'tar exit ' + code); }
-                    var target = extractDir + pathSep + archiveInstaller.replace(/\//g, pathSep);
-                    if (!fs.existsSync(target)) { L('cible non trouvée: ' + target); return done(-1, 'cible introuvable dans le zip'); }
-                    runInstaller(target, silentArgs, L, done);
-                });
-                tarChild.on('error', function (e) { L('tar error: ' + e); done(-1, 'tar: ' + e); });
+                try { tarChild.waitExit(); } catch (e) { L('tar waitExit: ' + e); }
+                var tarCode = (typeof tarChild.exitCode === 'number') ? tarChild.exitCode : -1;
+                if (tarCode !== 0) { L('tar exit ' + tarCode); return done(-1, 'tar exit ' + tarCode); }
+                var target = extractDir + pathSep + archiveInstaller.replace(/\//g, pathSep);
+                if (!fs.existsSync(target)) { L('cible non trouvée: ' + target); return done(-1, 'cible introuvable dans le zip'); }
+                runInstaller(target, silentArgs, L, done);
             } catch (e) {
                 L('tar spawn error: ' + e); done(-1, e);
             }
@@ -141,16 +140,16 @@ function runInstaller(target, silentArgs, L, done) {
     }
     try {
         var child = cp.execFile(exe, argv);
-        var stdoutBuf = '', stderrBuf = '';
-        if (child.stdout && child.stdout.on) child.stdout.on('data', function (c) { stdoutBuf += String(c); });
-        if (child.stderr && child.stderr.on) child.stderr.on('data', function (c) { stderrBuf += String(c); });
-        child.on('exit', function (code) {
-            if (stdoutBuf) L('stdout: ' + stdoutBuf.slice(-500));
-            if (stderrBuf) L('stderr: ' + stderrBuf.slice(-500));
-            L('exit ' + code);
-            done(typeof code === 'number' ? code : -1);
-        });
-        child.on('error', function (e) { L('exec error: ' + e); done(-1, e); });
+        // MeshAgent : on bloque l'event loop via waitExit() — c'est la primitive
+        // fiable côté Duktape, l'event 'exit' n'est pas toujours émis.
+        try { child.waitExit(); } catch (e) { L('waitExit: ' + e); }
+        var code = (typeof child.exitCode === 'number') ? child.exitCode : -1;
+        try {
+            if (child.stdout && child.stdout.str) L('stdout: ' + String(child.stdout.str).slice(-500));
+            if (child.stderr && child.stderr.str) L('stderr: ' + String(child.stderr.str).slice(-500));
+        } catch (e) {}
+        L('exit ' + code);
+        done(code);
     } catch (e) {
         L('spawn error: ' + e);
         done(-1, e);
