@@ -214,6 +214,55 @@ module.exports.softctl = function (parent) {
             console.log('softctl: webserver.app inaccessible — uploads HTTP indisponibles');
             return;
         }
+        // Endpoint download dédié, hors pluginadmin.ashx. MC rejette en 401 toute
+        // requête à pluginadmin.ashx sans cookie de session — donc l'agent
+        // (PowerShell sans cookie) ne peut pas y accéder. Notre token au porteur
+        // dans l'URL nous tient lieu d'auth.
+        app.get('/softctl-download/:token', (req, res) => {
+            try {
+                const token = String(req.params.token || '');
+                const entry = consumeDownloadToken(token);
+                if (!entry) return res.status(403).set('Content-Type', 'text/plain').send('forbidden');
+                const cfg = loadCfg();
+                if (!cfg || !cfg.softwareDir) return res.status(500).send('softwareDir non défini');
+                const folder = path.join(cfg.softwareDir, entry.slug);
+                const metaPath = path.join(folder, 'metadata.json');
+                if (!fs.existsSync(metaPath)) return res.status(404).send('soft introuvable');
+                const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+                if (!meta.installer) return res.status(404).send('installeur non défini');
+                const installerPath = path.join(folder, meta.installer);
+                if (!fs.existsSync(installerPath)) return res.status(404).send('fichier installeur manquant');
+                const stat = fs.statSync(installerPath);
+                res.set('Content-Type', 'application/octet-stream');
+                res.set('Content-Length', stat.size);
+                res.set('Content-Disposition', 'attachment; filename="' + meta.installer.replace(/"/g, '') + '"');
+                fs.createReadStream(installerPath).pipe(res);
+            } catch (e) { res.status(500).send(e.message); }
+        });
+
+        // Même logique pour le report-back du PowerShell post-install : pas de
+        // cookie côté agent, route dédiée avec token-au-porteur.
+        app.get('/softctl-report/:token', (req, res) => {
+            try {
+                const token = String(req.params.token || '');
+                const entry = reportTokens[token];
+                if (!entry || entry.expires < Date.now()) return res.status(404).set('Content-Type', 'text/plain').send('token invalide');
+                delete reportTokens[token];
+                const exitCode = parseInt(req.query.exit, 10);
+                const dep = deployments[entry.deploymentId];
+                if (dep) {
+                    const key = entry.softId + '|' + entry.nodeId;
+                    dep.results[key] = {
+                        status: (exitCode === 0) ? 'success' : 'fail',
+                        exitCode: isNaN(exitCode) ? -1 : exitCode,
+                        time: Date.now(),
+                    };
+                    saveHistory();
+                }
+                res.status(200).set('Content-Type', 'text/plain').send('ok');
+            } catch (e) { res.status(500).send(e.message); }
+        });
+
         app.put('/softctl-upload/:token', (req, res) => {
             try {
                 const token = String(req.params.token || '');
@@ -528,9 +577,15 @@ module.exports.softctl = function (parent) {
                 const results = [];
                 installable.forEach((s) => {
                     const token = newDownloadToken(s.id);
-                    const url = baseUrl + '/pluginadmin.ashx?pin=softctl&action=download&token=' + token;
+                    // Route dédiée /softctl-download/<token>, hors pluginadmin.ashx.
+                    const url = baseUrl + '/softctl-download/' + token;
                     // Échappe pour insertion littérale dans la chaîne PS.
                     const psEscape = (v) => String(v || '').replace(/'/g, "''");
+                    // Le PowerShell est entièrement encapsulé dans un try/finally
+                    // pour qu'on soit SÛR de toujours rapporter le résultat — même
+                    // si une étape (download, extract, install) plante. Les erreurs
+                    // sont aussi écrites dans un fichier softctl_log.txt à côté du
+                    // dossier temp pour qu'on puisse les inspecter sur le poste.
                     const ps = [
                         "$ErrorActionPreference = 'Stop'",
                         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12",
@@ -539,36 +594,49 @@ module.exports.softctl = function (parent) {
                         "$installer = '" + psEscape(s.installer) + "'",
                         "$silentArgs = '" + psEscape(s.silentArgs) + "'",
                         "$archiveInstaller = '" + psEscape(s.archiveInstaller || '') + "'",
+                        "$logPath = Join-Path $env:TEMP ('softctl_log_' + (Get-Date -Format yyyyMMdd_HHmmss) + '.txt')",
                         "$tmpDir = Join-Path $env:TEMP ('softctl_' + [System.Guid]::NewGuid().ToString('N'))",
-                        "New-Item -Path $tmpDir -ItemType Directory -Force | Out-Null",
-                        "$download = Join-Path $tmpDir $installer",
-                        "Write-Output \"softctl: download $url -> $download\"",
-                        "Invoke-WebRequest -Uri $url -OutFile $download -UseBasicParsing",
-                        "$ext = [System.IO.Path]::GetExtension($installer).ToLower()",
-                        "if ($ext -eq '.zip') {",
-                        "  if (-not $archiveInstaller) { Write-Output 'softctl: ERROR archive sans archiveInstaller'; Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue; exit 2 }",
-                        "  $extractDir = Join-Path $tmpDir 'extract'",
-                        "  Write-Output \"softctl: extract -> $extractDir\"",
-                        "  Expand-Archive -Path $download -DestinationPath $extractDir -Force",
-                        "  $target = Join-Path $extractDir $archiveInstaller",
-                        "  if (-not (Test-Path $target)) { Write-Output \"softctl: ERROR installeur non trouvé dans l'archive: $archiveInstaller\"; Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue; exit 3 }",
-                        "  $tExt = [System.IO.Path]::GetExtension($target).ToLower()",
-                        "  if ($tExt -eq '.msi') {",
-                        "    $msiArgs = \"/i `\"$target`\" \" + $silentArgs",
+                        "$proc = $null",
+                        "function Log($m) { try { Add-Content -Path $logPath -Value (\"[$(Get-Date -Format HH:mm:ss)] $m\") } catch {} ; Write-Output $m }",
+                        "Log \"softctl start: $installer\"",
+                        "try {",
+                        "  New-Item -Path $tmpDir -ItemType Directory -Force | Out-Null",
+                        "  $download = Join-Path $tmpDir $installer",
+                        "  Log \"download from $url\"",
+                        "  Invoke-WebRequest -Uri $url -OutFile $download -UseBasicParsing",
+                        "  Log \"downloaded $((Get-Item $download).Length) bytes\"",
+                        "  $ext = [System.IO.Path]::GetExtension($installer).ToLower()",
+                        "  if ($ext -eq '.zip') {",
+                        "    if (-not $archiveInstaller) { throw 'archive sans archiveInstaller' }",
+                        "    $extractDir = Join-Path $tmpDir 'extract'",
+                        "    Log \"extracting to $extractDir\"",
+                        "    Expand-Archive -Path $download -DestinationPath $extractDir -Force",
+                        "    $target = Join-Path $extractDir $archiveInstaller",
+                        "    if (-not (Test-Path $target)) { throw \"installeur non trouvé dans l'archive: $archiveInstaller\" }",
+                        "    $tExt = [System.IO.Path]::GetExtension($target).ToLower()",
+                        "    Log \"running $target (silent=$silentArgs)\"",
+                        "    if ($tExt -eq '.msi') {",
+                        "      $msiArgs = \"/i `\"$target`\" \" + $silentArgs",
+                        "      $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -PassThru -Wait",
+                        "    } else {",
+                        "      if ($silentArgs) { $proc = Start-Process -FilePath $target -ArgumentList $silentArgs -PassThru -Wait -WorkingDirectory (Split-Path $target) }",
+                        "      else { $proc = Start-Process -FilePath $target -PassThru -Wait -WorkingDirectory (Split-Path $target) }",
+                        "    }",
+                        "  } elseif ($ext -eq '.msi') {",
+                        "    $msiArgs = \"/i `\"$download`\" \" + $silentArgs",
+                        "    Log \"running msiexec $msiArgs\"",
                         "    $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -PassThru -Wait",
                         "  } else {",
-                        "    if ($silentArgs) { $proc = Start-Process -FilePath $target -ArgumentList $silentArgs -PassThru -Wait -WorkingDirectory (Split-Path $target) }",
-                        "    else { $proc = Start-Process -FilePath $target -PassThru -Wait -WorkingDirectory (Split-Path $target) }",
+                        "    Log \"running $download (silent=$silentArgs)\"",
+                        "    if ($silentArgs) { $proc = Start-Process -FilePath $download -ArgumentList $silentArgs -PassThru -Wait }",
+                        "    else { $proc = Start-Process -FilePath $download -PassThru -Wait }",
                         "  }",
-                        "} elseif ($ext -eq '.msi') {",
-                        "  $msiArgs = \"/i `\"$download`\" \" + $silentArgs",
-                        "  $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -PassThru -Wait",
-                        "} else {",
-                        "  if ($silentArgs) { $proc = Start-Process -FilePath $download -ArgumentList $silentArgs -PassThru -Wait }",
-                        "  else { $proc = Start-Process -FilePath $download -PassThru -Wait }",
+                        "  Log \"exit code $($proc.ExitCode)\"",
+                        "} catch {",
+                        "  Log \"ERROR: $_\"",
+                        "} finally {",
+                        "  Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue",
                         "}",
-                        "Write-Output \"softctl: exit code $($proc.ExitCode)\"",
-                        "Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue",
                     ].join('\r\n');
 
                     nodeIds.forEach((nodeId) => {
@@ -580,7 +648,7 @@ module.exports.softctl = function (parent) {
                             deploymentId: deploymentId, softId: s.id, nodeId: nodeId,
                             expires: Date.now() + REPORT_TTL_MS,
                         };
-                        const reportUrl = baseUrl + '/pluginadmin.ashx?pin=softctl&action=reportResult&token=' + reportToken;
+                        const reportUrl = baseUrl + '/softctl-report/' + reportToken;
                         // Petit suffixe PS qui poste le résultat. On l'append au
                         // script principal et on s'arrange pour qu'il s'exécute
                         // même si l'install échoue (try/finally).
