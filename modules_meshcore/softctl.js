@@ -185,12 +185,33 @@ function doWingetInstall(data) {
     // --scope machine n'est dispo qu'à l'install. upgrade hérite du scope
     // d'origine, uninstall n'en a pas besoin.
     if (mode === 'install') cmdLine += ' --scope machine';
-    // --force : utile pour réinstaller par-dessus une version posée hors
-    // winget (Chrome posé via MSI Google par ex.) afin que winget en
-    // reprenne la main pour les futures mises à jour.
-    if (data.force) cmdLine += ' --force';
-    var argv = ['/c', cmdLine + ' >nul 2>nul'];
+    // --force : skip checks divers (signature, dépendances ignorables).
+    // --uninstall-previous : désinstalle d'abord la version en place
+    //   (la seule manière de reprendre la main quand un paquet a été posé
+    //   hors winget, ex: Chrome via MSI Google).
+    if (data.force) {
+        cmdLine += ' --force';
+        if (mode === 'install' || mode === 'upgrade') cmdLine += ' --uninstall-previous';
+    }
+    // On capture la sortie winget dans un fichier (et non >nul) pour pouvoir
+    // la remonter dans le log côté serveur — sinon impossible de diagnostiquer
+    // un échec.
+    var tmpRoot = (process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp');
+    var logFile = tmpRoot + '\\softctl_winget_' + Date.now() + '_' + Math.floor(Math.random() * 1e9) + '.log';
+    var argv = ['/c', cmdLine + ' > "' + logFile + '" 2>&1'];
     L('exec cmd /c ' + cmdLine);
+    function readWingetLog() {
+        try {
+            if (!fs.existsSync(logFile)) return;
+            var txt = fs.readFileSync(logFile, 'utf8');
+            // Garde les ~600 derniers caractères, en stripant les caractères
+            // de contrôle de progression (winget spam des \r et codes ANSI).
+            txt = txt.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '\n');
+            txt = txt.split('\n').map(function (s) { return s.trim(); }).filter(Boolean).slice(-15).join(' | ');
+            if (txt) L('winget: ' + txt);
+            try { fs.unlinkSync(logFile); } catch (_) {}
+        } catch (e) {}
+    }
     try {
         var child = cp.execFile(exe, argv);
         var finished = false;
@@ -198,6 +219,7 @@ function doWingetInstall(data) {
             child.on('exit', function (code) {
                 if (finished) return;
                 finished = true;
+                readWingetLog();
                 L('exit ' + code);
                 // winget renvoie parfois 0x8A150011 (déjà installé) ou
                 // 0x8A15002B (no applicable upgrade) qu'on mappe en succès.
