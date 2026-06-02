@@ -463,8 +463,11 @@
         var key = s.id + '|' + n.id;
         var r = (d.results || {})[key] || { status: 'pending' };
         var ec = r.exitCode != null ? ' (' + r.exitCode + ')' : '';
-        var title = r.error ? ' title="' + escapeHtml(r.error) + '"' : '';
-        html += '<td style="padding:4px;border-bottom:1px solid #f0f0f0"><span class="resCell ' + statusClass(r.status) + '"' + title + '>' + statusLabel(r.status) + ec + '</span></td>';
+        var hasDetail = !!(r.error || r.log);
+        var title = r.error ? ' title="' + escapeHtml(r.error) + (hasDetail ? ' — cliquer pour le log complet' : '') + '"' : (hasDetail ? ' title="cliquer pour le log"' : '');
+        var dataDet = hasDetail ? ' data-detail="' + escapeHtml(JSON.stringify({ soft: s.name, node: agentName(n), status: r.status, exitCode: r.exitCode, error: r.error || '', log: r.log || '' })) + '"' : '';
+        var style = hasDetail ? ' style="cursor:pointer"' : '';
+        html += '<td style="padding:4px;border-bottom:1px solid #f0f0f0"><span class="resCell ' + statusClass(r.status) + '"' + title + dataDet + style + '>' + statusLabel(r.status) + ec + '</span></td>';
       });
       html += '</tr>';
     });
@@ -473,6 +476,23 @@
     div.style.display = '';
     div.innerHTML = html;
     $('preview').style.display = 'none';
+    // Clic sur une cellule de résultat → modale avec le log winget complet.
+    [].slice.call(div.querySelectorAll('[data-detail]')).forEach(function (el) {
+      el.onclick = function () {
+        try {
+          var d = JSON.parse(el.getAttribute('data-detail'));
+          var bg = showModal([
+            '<h3>Détail — ' + escapeHtml(d.node) + '</h3>',
+            '<div style="font-size:12px;color:#666;margin-bottom:6px">' + escapeHtml(d.soft) + ' · status: ' + escapeHtml(d.status) + (d.exitCode != null ? ' · exit ' + d.exitCode : '') + '</div>',
+            (d.error ? '<div style="background:#f8d7da;color:#721c24;padding:6px 8px;border-radius:4px;margin-bottom:6px"><b>Erreur:</b> ' + escapeHtml(d.error) + '</div>' : ''),
+            '<div style="font-size:11px;color:#666;margin-bottom:2px">Log (dernières lignes):</div>',
+            '<pre style="background:#1e1e1e;color:#d4d4d4;padding:8px;border-radius:4px;max-height:50vh;overflow:auto;font-size:11px;white-space:pre-wrap">' + escapeHtml(d.log || '(aucun log)') + '</pre>',
+            '<div class="actions"><button id="dClose">Fermer</button></div>',
+          ].join(''));
+          bg.querySelector('#dClose').onclick = function () { closeModal(bg); };
+        } catch (e) {}
+      };
+    });
     document.getElementById('cancelDeployBtn').onclick = function () {
       if (!confirm('Marquer les installations en attente comme annulées ?\n\n(Note: les installs déjà en cours sur les postes vont à leur terme — Windows ne se laisse pas interrompre proprement à distance.)')) return;
       api('cancelDeployment', { id: d.id }).then(function () {
