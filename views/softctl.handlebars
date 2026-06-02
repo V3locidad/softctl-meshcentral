@@ -211,9 +211,19 @@
     var bg = showModal([
       '<h3>Historique — ' + escapeHtml(nodeName || nodeId) + '</h3>',
       '<div id="nhBody">Chargement…</div>',
-      '<div class="actions"><button id="nhClose">Fermer</button></div>',
+      '<div class="actions">',
+      '  <button id="nhClear" style="background:#fbe9e7;color:#8a2a17;border-color:#f5c2b8">Vider pour ce poste</button>',
+      '  <button id="nhClose">Fermer</button>',
+      '</div>',
     ].join(''));
     bg.querySelector('#nhClose').onclick = function () { closeModal(bg); };
+    bg.querySelector('#nhClear').onclick = function () {
+      if (!confirm('Retirer ' + (nodeName || nodeId) + ' de tout l\'historique des déploiements ?')) return;
+      api('clearNodeHistory', { nodeId: nodeId }).then(function (r) {
+        if (r && r.ok) { closeModal(bg); openNodeHistory(nodeId, nodeName); }
+        else alert('Erreur : ' + (r && r.error || 'inconnue'));
+      });
+    };
     api('nodeHistory', { nodeId: nodeId }).then(function (r) {
       var deps = r.deployments || [];
       if (!deps.length) {
@@ -476,9 +486,19 @@
     var bg = showModal([
       '<h3>Historique des déploiements</h3>',
       '<div id="histBody">Chargement…</div>',
-      '<div class="actions"><button id="hClose">Fermer</button></div>',
+      '<div class="actions">',
+      '  <button id="hClear" style="background:#fbe9e7;color:#8a2a17;border-color:#f5c2b8">Vider l\'historique</button>',
+      '  <button id="hClose">Fermer</button>',
+      '</div>',
     ].join(''));
     bg.querySelector('#hClose').onclick = function () { closeModal(bg); };
+    bg.querySelector('#hClear').onclick = function () {
+      if (!confirm('Vider tout l\'historique des déploiements ? Cette action est irréversible.')) return;
+      api('clearHistory').then(function (r) {
+        if (r && r.ok) { closeModal(bg); openHistory(); }
+        else alert('Erreur : ' + (r && r.error || 'inconnue'));
+      });
+    };
     api('history').then(function (r) {
       var rows = (r.deployments || []).map(function (d) {
         var c = d.counts || {};

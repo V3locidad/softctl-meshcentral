@@ -797,6 +797,42 @@ module.exports.softctl = function (parent) {
             return;
         }
 
+        if (action === 'clearHistory') {
+            // Vide tout l'historique des déploiements.
+            const n = Object.keys(deployments).length;
+            Object.keys(deployments).forEach((k) => { delete deployments[k]; });
+            saveHistory();
+            console.log('softctl: history cleared (' + n + ' entrées)');
+            return sendJson(res, 200, { ok: true, cleared: n });
+        }
+
+        if (action === 'clearNodeHistory') {
+            // Retire un node donné de tous les déploiements de l'historique.
+            // Si un déploiement ne ciblait que ce node, l'entrée est supprimée.
+            const nodeId = String(req.query.nodeId || '');
+            if (!nodeId) return sendJson(res, 400, { error: 'nodeId requis' });
+            let removed = 0, trimmed = 0;
+            Object.keys(deployments).forEach((depId) => {
+                const d = deployments[depId];
+                const nodes = (d.nodes || []).filter((n) => n.id === nodeId);
+                if (!nodes.length) return;
+                const remaining = (d.nodes || []).filter((n) => n.id !== nodeId);
+                if (!remaining.length) {
+                    delete deployments[depId];
+                    removed++;
+                } else {
+                    d.nodes = remaining;
+                    Object.keys(d.results || {}).forEach((k) => {
+                        if (k.endsWith('|' + nodeId)) delete d.results[k];
+                    });
+                    trimmed++;
+                }
+            });
+            saveHistory();
+            console.log('softctl: nodeHistory cleared ' + nodeId + ' (' + removed + ' supprimés, ' + trimmed + ' allégés)');
+            return sendJson(res, 200, { ok: true, removed: removed, trimmed: trimmed });
+        }
+
         if (action === 'nodeHistory') {
             // Historique des déploiements ayant ciblé un node donné.
             // Renvoie pour chaque déploiement : date, user, soft(s), status pour ce node.
