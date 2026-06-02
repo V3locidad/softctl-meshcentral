@@ -96,12 +96,19 @@ function doInstall(data) {
             var extractDir = tmpDir + pathSep + 'extract';
             try { fs.mkdirSync(extractDir); } catch (e) {}
             L('extract via tar -> ' + extractDir);
-            cp.execFile('tar.exe', ['-xf', downloadPath, '-C', extractDir], { timeout: 600000 }, function (xerr) {
-                if (xerr) { L('tar error: ' + xerr); return done(-1, 'extract: ' + xerr); }
-                var target = extractDir + pathSep + archiveInstaller.replace(/\//g, pathSep);
-                if (!fs.existsSync(target)) { L('cible non trouvée: ' + target); return done(-1, 'cible introuvable dans le zip'); }
-                runInstaller(target, silentArgs, L, done);
-            });
+            var tarExe = (process.env.windir || process.env.WINDIR || 'C:\\Windows') + '\\System32\\tar.exe';
+            try {
+                var tarChild = cp.execFile(tarExe, ['-xf', downloadPath, '-C', extractDir]);
+                tarChild.on('exit', function (code) {
+                    if (code !== 0) { L('tar exit ' + code); return done(-1, 'tar exit ' + code); }
+                    var target = extractDir + pathSep + archiveInstaller.replace(/\//g, pathSep);
+                    if (!fs.existsSync(target)) { L('cible non trouvée: ' + target); return done(-1, 'cible introuvable dans le zip'); }
+                    runInstaller(target, silentArgs, L, done);
+                });
+                tarChild.on('error', function (e) { L('tar error: ' + e); done(-1, 'tar: ' + e); });
+            } catch (e) {
+                L('tar spawn error: ' + e); done(-1, e);
+            }
         } else {
             runInstaller(downloadPath, silentArgs, L, done);
         }
@@ -113,24 +120,29 @@ function runInstaller(target, silentArgs, L, done) {
     var ext = target.toLowerCase().split('.').pop();
     var argv;
     var exe;
+    var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
     if (ext === 'msi') {
-        exe = 'msiexec.exe';
+        // MeshAgent execFile veut un chemin absolu.
+        exe = windir + '\\System32\\msiexec.exe';
         argv = ['/i', target].concat(silentArgs ? silentArgs.split(/\s+/).filter(Boolean) : []);
-        L('msiexec ' + argv.join(' '));
+        L('exec ' + exe + ' ' + argv.join(' '));
     } else {
         exe = target;
         argv = silentArgs ? silentArgs.split(/\s+/).filter(Boolean) : [];
-        L('run ' + target + ' ' + argv.join(' '));
+        L('exec ' + target + ' ' + argv.join(' '));
     }
-    var child;
     try {
-        child = cp.execFile(exe, argv, { timeout: 30 * 60 * 1000 }, function (err, stdout, stderr) {
-            var code = child && (child.exitCode != null) ? child.exitCode : (err ? (err.code || -1) : 0);
-            if (stdout) L('stdout: ' + String(stdout).slice(-500));
-            if (stderr) L('stderr: ' + String(stderr).slice(-500));
+        var child = cp.execFile(exe, argv);
+        var stdoutBuf = '', stderrBuf = '';
+        if (child.stdout && child.stdout.on) child.stdout.on('data', function (c) { stdoutBuf += String(c); });
+        if (child.stderr && child.stderr.on) child.stderr.on('data', function (c) { stderrBuf += String(c); });
+        child.on('exit', function (code) {
+            if (stdoutBuf) L('stdout: ' + stdoutBuf.slice(-500));
+            if (stderrBuf) L('stderr: ' + stderrBuf.slice(-500));
             L('exit ' + code);
-            done(code);
+            done(typeof code === 'number' ? code : -1);
         });
+        child.on('error', function (e) { L('exec error: ' + e); done(-1, e); });
     } catch (e) {
         L('spawn error: ' + e);
         done(-1, e);
