@@ -792,6 +792,30 @@ module.exports.softctl = function (parent) {
             return;
         }
 
+        if (action === 'selfCheck') {
+            // Diagnostic : vérifie si softctl est bien enregistré côté pluginHandler
+            // et si modules_meshcore est lisible. Permet de comprendre pourquoi
+            // l'agent ne reçoit pas notre module meshcore.
+            const fs = require('fs');
+            const path = require('path');
+            const ph = obj.meshServer && obj.meshServer.pluginHandler;
+            const info = {
+                hasPluginHandler: !!ph,
+                pluginsKeys: ph ? Object.keys(ph.plugins || {}) : null,
+                softctlRegistered: ph && ph.plugins && !!ph.plugins.softctl,
+                pluginPath: ph ? ph.pluginPath : null,
+                __dirname: __dirname,
+            };
+            try {
+                const mp = path.join(__dirname, 'modules_meshcore');
+                info.modulesMeshcoreFiles = fs.readdirSync(mp);
+                info.modulesMeshcoreSize = fs.statSync(path.join(mp, 'softctl.js')).size;
+            } catch (e) {
+                info.modulesMeshcoreError = e.message;
+            }
+            return sendJson(res, 200, info);
+        }
+
         if (action === 'pingAgent') {
             // Envoie un message plugin "ping" à un agent et attend que le module
             // meshcore softctl réponde "pong". Permet de valider la liaison
