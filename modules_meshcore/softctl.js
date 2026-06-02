@@ -138,60 +138,33 @@ function runInstaller(target, silentArgs, L, done) {
 }
 
 function download(url, dest, cb) {
-    // Parse manuel — MeshAgent (Duktape) n'a pas le module 'url' de Node.
-    var u = parseUrl(url);
-    if (!u) return cb('url invalide: ' + url);
-    var mod = (u.protocol === 'https:') ? require('https') : require('http');
-    var opts = {
-        host: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80),
-        path: u.path, method: 'GET', rejectUnauthorized: false,
-    };
-    var fs = require('fs');
+    // Pattern MeshAgent officiel (cf. agents/meshcore.js > downloadFile) :
+    //   - require('http').parseUri pour parser l'URL
+    //   - require('https').get(options) avec checkServerIdentity custom
+    //   - écoute event 'response', stream.pipe() côté agent
     var done = false;
-    var ws = fs.createWriteStream(dest);
-    var to = null;
-    var bytes = 0;
-    function finish(ok, err) {
-        if (done) return; done = true;
-        if (to) { try { clearTimeout(to); } catch (e) {} }
-        try { ws.end(); } catch (e) {}
-        cb(ok ? null : (err || 'erreur'));
+    function finish(ok, err) { if (done) return; done = true; cb(ok ? null : (err || 'erreur')); }
+    var options;
+    try { options = require('http').parseUri(url); }
+    catch (e) { return finish(false, 'parseUri: ' + e); }
+    options.rejectUnauthorized = false;
+    options.checkServerIdentity = function () { /* accept self-signed */ };
+    dbg('download: GET ' + url);
+    try {
+        var dl = require('https').get(options);
+        dl.on('error', function (e) { dbg('dl error: ' + e); finish(false, 'dl: ' + e); });
+        dl.on('response', function (res) {
+            dbg('download: response status=' + res.statusCode);
+            if (res.statusCode !== 200) { finish(false, 'HTTP ' + res.statusCode); return; }
+            var fs = require('fs');
+            var ws = fs.createWriteStream(dest, { flags: 'wb' });
+            ws.on('finish', function () { dbg('download: ws finish'); finish(true); });
+            ws.on('error', function (e) { dbg('ws error: ' + e); finish(false, 'ws: ' + e); });
+            res.pipe(ws);
+        });
+    } catch (e) {
+        finish(false, 'https.get: ' + e);
     }
-    dbg('download: request ' + u.hostname + ':' + opts.port + ' ' + u.path);
-    var req = mod.request(opts, function (res) {
-        dbg('download: response status=' + res.statusCode);
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers && res.headers.location) {
-            try { res.resume(); } catch (e) {} finish(false, 'redirect non suivi (' + res.statusCode + ')'); return;
-        }
-        if (res.statusCode !== 200) {
-            try { res.resume(); } catch (e) {} finish(false, 'HTTP ' + res.statusCode); return;
-        }
-        // Pas de res.pipe fiable côté MeshAgent — on lit les chunks à la main.
-        res.on('data', function (chunk) {
-            bytes += chunk.length;
-            try { ws.write(chunk); } catch (e) { dbg('write err: ' + e); }
-        });
-        res.on('end', function () {
-            dbg('download: end (' + bytes + ' octets)');
-            try { ws.end(function () { finish(true); }); } catch (e) { finish(true); }
-        });
-        res.on('error', function (e) { dbg('res error: ' + e); finish(false, 'res: ' + e); });
-    });
-    req.on('error', function (e) { dbg('req error: ' + e); finish(false, 'req: ' + e); });
-    try { to = setTimeout(function () { try { req.end(); } catch (e) {} finish(false, 'timeout'); }, 600000); } catch (e) {}
-    req.end();
-}
-
-function parseUrl(url) {
-    // ex: https://172.17.103.243/softctl-download/abc -> {protocol, hostname, port, path}
-    var m = /^(https?:)\/\/([^/:?#]+)(?::(\d+))?(\/.*)?$/i.exec(url);
-    if (!m) return null;
-    return {
-        protocol: m[1].toLowerCase(),
-        hostname: m[2],
-        port: m[3] ? parseInt(m[3], 10) : null,
-        path: m[4] || '/',
-    };
 }
 
 function mkdirP(p) {
