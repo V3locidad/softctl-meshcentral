@@ -35,7 +35,6 @@ function reply(payload) {
 function consoleaction(args, rights, sessionid, parent) {
     mesh = parent;
     var fnname = args.pluginaction || (args._ && args._[1]);
-    dbg('consoleaction ' + fnname);
     try {
         switch (fnname) {
             case 'ping':
@@ -153,18 +152,10 @@ function runInstaller(target, silentArgs, L, done) {
             child.on('exit', function (code) {
                 if (finished) return;
                 finished = true;
-                dbg('event exit ' + code);
-                try { if (child.stdout && child.stdout.str) L('stdout: ' + String(child.stdout.str).slice(-500)); } catch (e) {}
-                try { if (child.stderr && child.stderr.str) L('stderr: ' + String(child.stderr.str).slice(-500)); } catch (e) {}
                 L('exit ' + code);
                 done(typeof code === 'number' ? code : -1);
             });
-        } catch (e) { dbg('on exit failed: ' + e); }
-        try {
-            if (child.stdout) { child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += String(c); }); }
-            if (child.stderr) { child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += String(c); }); }
         } catch (e) {}
-        dbg('spawned, exitCode=' + child.exitCode);
         // Si déjà exited entre temps (race), on déclenche manuellement.
         if (typeof child.exitCode === 'number' && !finished) {
             finished = true;

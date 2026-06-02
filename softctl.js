@@ -212,13 +212,8 @@ module.exports.softctl = function (parent) {
     // C'est le retour d'install : on met à jour le déploiement et l'historique.
     obj.serveraction = function (command, myparent) {
         try {
-            // Trace toute remontée pour diagnostiquer la liaison agent → serveur.
-            console.log('softctl: serveraction RX ' + JSON.stringify(command).slice(0, 300));
             if (!command) return;
-            if (command.pluginaction === 'pong') {
-                console.log('softctl: PONG reçu de ' + (myparent && myparent.dbNodeKey) + ' platform=' + command.agent);
-                return;
-            }
+            if (command.pluginaction === 'pong') return;
             if (command.pluginaction !== 'installComplete') return;
             const tok = command.dispatchId;
             if (!tok) return;
@@ -736,62 +731,6 @@ module.exports.softctl = function (parent) {
             return;
         }
 
-        if (action === 'testConsoleCmd') {
-            // Envoie une commande à l'agent via le canal Console (msg/console).
-            // Sert à valider que ws.send + msg/console marche pour notre cas.
-            const nodeId = String(req.query.nodeId || '');
-            const cmd = String(req.query.cmd || 'ps');
-            const wsagents = obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents;
-            if (!wsagents) return sendJson(res, 500, { error: 'wsagents inaccessible' });
-            const ws = wsagents[nodeId];
-            if (!ws) return sendJson(res, 404, { error: 'agent introuvable' });
-            const message = { action: 'msg', type: 'console', value: cmd, sessionid: 'softctl-test' };
-            let tried = [];
-            const tryOne = (label, fn) => { try { fn(); tried.push(label + ':ok'); } catch (e) { tried.push(label + ':ko=' + e.message); } };
-            tryOne('send-object', () => ws.send(message));
-            tryOne('send-string', () => ws.send(JSON.stringify(message)));
-            sendJson(res, 200, { message: message, attempts: tried });
-            return;
-        }
-
-        if (action === 'debugWsAgent') {
-            // Diagnostic: examine ce que MeshCentral expose pour un node donné.
-            // Aide à comprendre pourquoi nos runcommands ne déclenchent rien.
-            const nodeId = String(req.query.nodeId || '');
-            const ws = obj.meshServer && obj.meshServer.webserver;
-            const wsagents = ws && ws.wsagents;
-            if (!wsagents) return sendJson(res, 200, { error: 'wsagents inaccessible' });
-            const keys = Object.keys(wsagents).slice(0, 20);
-            const target = wsagents[nodeId];
-            const detail = target ? {
-                hasSend: typeof target.send === 'function',
-                hasWs: !!target.ws,
-                hasInnerSend: target.ws && typeof target.ws.send === 'function',
-                readyState: target.readyState,
-                dbNodeKey: target.dbNodeKey,
-                nodeid: target.nodeid,
-                authenticated: target.authenticated,
-                ctorName: target.constructor && target.constructor.name,
-                keys: Object.keys(target).slice(0, 30),
-            } : 'not in wsagents';
-            // Liste aussi les méthodes côté meshServer qui ressemblent à un dispatch.
-            const meshServerMethods = obj.meshServer ? Object.getOwnPropertyNames(obj.meshServer)
-                .filter((k) => /send|command|message|dispatch/i.test(k))
-                .slice(0, 30) : [];
-            const webserverMethods = ws ? Object.getOwnPropertyNames(ws)
-                .filter((k) => /send|command|message|dispatch/i.test(k))
-                .slice(0, 30) : [];
-            sendJson(res, 200, {
-                wsAgentCount: Object.keys(wsagents).length,
-                sampleKeys: keys,
-                requestedNode: nodeId,
-                requestedNodeDetail: detail,
-                meshServerMethods: meshServerMethods,
-                webserverMethods: webserverMethods,
-            });
-            return;
-        }
-
         if (action === 'selfCheck') {
             // Diagnostic : vérifie si softctl est bien enregistré côté pluginHandler
             // et si modules_meshcore est lisible. Permet de comprendre pourquoi
@@ -830,8 +769,7 @@ module.exports.softctl = function (parent) {
             const dispatchId = 'ping-' + Date.now();
             try {
                 target.send(JSON.stringify({ action: 'plugin', plugin: 'softctl', pluginaction: 'ping', dispatchId: dispatchId }));
-                console.log('softctl: ping sent to ' + nodeId + ' dispatchId=' + dispatchId);
-                return sendJson(res, 200, { ok: true, dispatchId: dispatchId, note: 'regarde le log MC pour PONG' });
+                return sendJson(res, 200, { ok: true, dispatchId: dispatchId });
             } catch (e) {
                 return sendJson(res, 200, { ok: false, error: e.message });
             }
