@@ -722,6 +722,24 @@ module.exports.softctl = function (parent) {
             return;
         }
 
+        if (action === 'testConsoleCmd') {
+            // Envoie une commande à l'agent via le canal Console (msg/console).
+            // Sert à valider que ws.send + msg/console marche pour notre cas.
+            const nodeId = String(req.query.nodeId || '');
+            const cmd = String(req.query.cmd || 'ps');
+            const wsagents = obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents;
+            if (!wsagents) return sendJson(res, 500, { error: 'wsagents inaccessible' });
+            const ws = wsagents[nodeId];
+            if (!ws) return sendJson(res, 404, { error: 'agent introuvable' });
+            const message = { action: 'msg', type: 'console', value: cmd, sessionid: 'softctl-test' };
+            let tried = [];
+            const tryOne = (label, fn) => { try { fn(); tried.push(label + ':ok'); } catch (e) { tried.push(label + ':ko=' + e.message); } };
+            tryOne('send-object', () => ws.send(message));
+            tryOne('send-string', () => ws.send(JSON.stringify(message)));
+            sendJson(res, 200, { message: message, attempts: tried });
+            return;
+        }
+
         if (action === 'debugWsAgent') {
             // Diagnostic: examine ce que MeshCentral expose pour un node donné.
             // Aide à comprendre pourquoi nos runcommands ne déclenchent rien.
