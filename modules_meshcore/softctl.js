@@ -191,7 +191,11 @@ function doWingetInstall(data) {
     //   hors winget, ex: Chrome via MSI Google).
     if (data.force) {
         cmdLine += ' --force';
-        if (mode === 'install' || mode === 'upgrade') cmdLine += ' --uninstall-previous';
+        // --uninstall-previous uniquement en upgrade : en install, ça fait
+        // bailer winget avec 0x8A15005E si le paquet a été posé hors winget
+        // (ex: Chrome via MSI Google) — winget ne sait pas le désinstaller.
+        // --force seul suffit à overlay-installer par-dessus.
+        if (mode === 'upgrade') cmdLine += ' --uninstall-previous';
     }
     // On capture la sortie winget dans un fichier (et non >nul) pour pouvoir
     // la remonter dans le log côté serveur — sinon impossible de diagnostiquer
