@@ -197,8 +197,20 @@ function doWingetInstall(data) {
     // la remonter dans le log côté serveur — sinon impossible de diagnostiquer
     // un échec.
     var tmpRoot = (process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp');
-    var logFile = tmpRoot + '\\softctl_winget_' + Date.now() + '_' + Math.floor(Math.random() * 1e9) + '.log';
-    var argv = ['/c', cmdLine + ' > "' + logFile + '" 2>&1'];
+    var stamp = Date.now() + '_' + Math.floor(Math.random() * 1e9);
+    var logFile = tmpRoot + '\\softctl_winget_' + stamp + '.log';
+    // On passe par un .bat temporaire : impossible d'éviter sinon le piège de
+    // parsing de cmd.exe /c quand cmdLine commence par " (chemin avec espace)
+    // ET contient des caractères spéciaux (>). cmd strippe les guillemets
+    // externes et casse le chemin → winget ne démarre pas, exit 1, log vide.
+    var batFile = tmpRoot + '\\softctl_winget_' + stamp + '.bat';
+    try {
+        fs.writeFileSync(batFile, '@echo off\r\n' + cmdLine + ' > "' + logFile + '" 2>&1\r\n');
+    } catch (e) {
+        L('write bat: ' + e);
+        return done(-1, 'écriture script winget impossible');
+    }
+    var argv = ['/c', batFile];
     L('exec cmd /c ' + cmdLine);
     function readWingetLog() {
         try {
@@ -210,6 +222,7 @@ function doWingetInstall(data) {
             txt = txt.split('\n').map(function (s) { return s.trim(); }).filter(Boolean).slice(-15).join(' | ');
             if (txt) L('winget: ' + txt);
             try { fs.unlinkSync(logFile); } catch (_) {}
+            try { fs.unlinkSync(batFile); } catch (_) {}
         } catch (e) {}
     }
     try {
