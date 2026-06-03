@@ -144,7 +144,7 @@ function doWingetInstall(data) {
             pluginaction: 'installComplete',
             dispatchId: dispatchId,
             exit: (typeof exit === 'number') ? exit : -1,
-            log: log.slice(-30).join('\n'),
+            log: log.slice(-60).join('\n'),
             error: err ? String(err) : undefined,
             skipped: !!skipped,
         });
@@ -207,6 +207,11 @@ function doWingetInstall(data) {
     var tmpRoot = (process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp');
     var stamp = Date.now() + '_' + Math.floor(Math.random() * 1e9);
     var logFile = tmpRoot + '\\softctl_winget_' + stamp + '.log';
+    // winget écrit son vrai diag interne dans un fichier dédié via --log,
+    // pas sur stdout. Sur une bail précoce (manifest non match, contrainte
+    // d'arch, etc.) stdout reste vide mais --log contient tout.
+    var wingetLogFile = tmpRoot + '\\softctl_winget_internal_' + stamp + '.log';
+    cmdLine += ' --log "' + wingetLogFile + '"';
     // On passe par un .bat temporaire : impossible d'éviter sinon le piège de
     // parsing de cmd.exe /c quand cmdLine commence par " (chemin avec espace)
     // ET contient des caractères spéciaux (>). cmd strippe les guillemets
@@ -222,16 +227,23 @@ function doWingetInstall(data) {
     L('exec cmd /c ' + cmdLine);
     function readWingetLog() {
         try {
-            if (!fs.existsSync(logFile)) return;
-            var txt = fs.readFileSync(logFile, 'utf8');
-            // Garde les ~600 derniers caractères, en stripant les caractères
-            // de contrôle de progression (winget spam des \r et codes ANSI).
-            txt = txt.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '\n');
-            txt = txt.split('\n').map(function (s) { return s.trim(); }).filter(Boolean).slice(-15).join(' | ');
-            if (txt) L('winget: ' + txt);
-            try { fs.unlinkSync(logFile); } catch (_) {}
+            if (fs.existsSync(logFile)) {
+                var txt = fs.readFileSync(logFile, 'utf8');
+                txt = txt.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '\n');
+                txt = txt.split('\n').map(function (s) { return s.trim(); }).filter(Boolean).slice(-15).join(' | ');
+                if (txt) L('winget stdout: ' + txt);
+                try { fs.unlinkSync(logFile); } catch (_) {}
+            }
+            if (fs.existsSync(wingetLogFile)) {
+                var diag = fs.readFileSync(wingetLogFile, 'utf8');
+                // Le log winget est riche : on garde les 25 dernières lignes
+                // non vides, suffisant pour voir la raison du bail.
+                diag = diag.replace(/\r/g, '\n').split('\n').map(function (s) { return s.trim(); }).filter(Boolean).slice(-25);
+                for (var i = 0; i < diag.length; i++) L('winget log: ' + diag[i]);
+                try { fs.unlinkSync(wingetLogFile); } catch (_) {}
+            }
             try { fs.unlinkSync(batFile); } catch (_) {}
-        } catch (e) {}
+        } catch (e) { L('readWingetLog err: ' + e); }
     }
     try {
         var child = cp.execFile(exe, argv);
