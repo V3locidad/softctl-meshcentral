@@ -792,7 +792,16 @@
                     + (upgrades.length ? ' <button id="invUpgAll" style="margin-left:8px">⬆ Tout mettre à jour</button>' : '')
                     + '</div>';
         var insHead = '<div style="margin:14px 0 4px 0;font-weight:bold">📚 Logiciels installés <span class="pill">' + installed.length + '</span></div>';
-        box.innerHTML = upgHead + renderTable(upgrades, 'upgrade') + insHead + renderTable(installed, 'installed');
+        var rawDump = '';
+        if ((!installed.length || !upgrades.length) && (r.rawList || r.rawUpgrade)) {
+          rawDump = '<details style="margin-top:12px"><summary style="cursor:pointer;color:#666">🐛 Sortie brute winget (diagnostic)</summary>'
+                  + '<div style="font-weight:bold;margin-top:6px">winget list :</div>'
+                  + '<pre style="background:#1e1e1e;color:#eee;padding:8px;border-radius:4px;max-height:200px;overflow:auto;font-size:12px">' + escapeHtml(r.rawList || '(vide)') + '</pre>'
+                  + '<div style="font-weight:bold;margin-top:6px">winget upgrade :</div>'
+                  + '<pre style="background:#1e1e1e;color:#eee;padding:8px;border-radius:4px;max-height:200px;overflow:auto;font-size:12px">' + escapeHtml(r.rawUpgrade || '(vide)') + '</pre>'
+                  + '</details>';
+        }
+        box.innerHTML = upgHead + renderTable(upgrades, 'upgrade') + insHead + renderTable(installed, 'installed') + rawDump;
 
         function dispatchAction(mode, packageIds) {
           if (!confirm('Confirmer : ' + mode + ' ' + (packageIds[0] === '*' ? '(tout)' : packageIds.join(', ')) + ' sur ' + label + ' ?')) return;

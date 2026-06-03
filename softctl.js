@@ -226,6 +226,8 @@ module.exports.softctl = function (parent) {
                         error: command.error || undefined,
                         installed: command.installed || [],
                         upgrades: command.upgrades || [],
+                        rawList: command.rawList || '',
+                        rawUpgrade: command.rawUpgrade || '',
                     }));
                 } catch (e) {}
                 return;

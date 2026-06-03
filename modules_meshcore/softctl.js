@@ -532,11 +532,31 @@ function doWingetInventory(data) {
         } catch (e) { cb(e, ''); }
     }
 
+    function snippet(s) {
+        if (!s) return '';
+        s = s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '\n');
+        // Garde les 30 dernières lignes non vides après filtrage des barres de
+        // progression (lignes pleines de █ ou - sans données).
+        var lines = s.split('\n').map(function (x) { return x.trim(); }).filter(function (x) {
+            if (!x) return false;
+            if (/^[█░▒▓\s\d\.%\/MKBoG-]+$/i.test(x) && x.indexOf('|') === -1) {
+                // ligne de progression : tout sauf data
+                return false;
+            }
+            return true;
+        });
+        return lines.slice(-30).join('\n');
+    }
     runWinget('list --source winget --accept-source-agreements', function (err1, out1) {
         var installed = parseWingetTable(out1 || '');
         runWinget('upgrade --include-unknown --source winget --accept-source-agreements', function (err2, out2) {
             var upgrades = parseWingetTable(out2 || '');
-            send({ installed: installed, upgrades: upgrades });
+            send({
+                installed: installed,
+                upgrades: upgrades,
+                rawList: snippet(out1 || ''),
+                rawUpgrade: snippet(out2 || ''),
+            });
         });
     });
 }
