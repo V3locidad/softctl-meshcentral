@@ -180,6 +180,10 @@ function doWingetInstall(data) {
         cmdLine += ' --all --include-unknown';
     } else {
         cmdLine += ' --id ' + packageId + ' --exact';
+        // --source winget : sur certains postes la source msstore est cassée
+        // (TLS cert mismatch). Sans ce flag winget bail avec 0x8A15005E
+        // « Please specify --source ». On ne vise que la source winget.
+        cmdLine += ' --source winget';
     }
     cmdLine += ' --silent --accept-source-agreements --accept-package-agreements';
     // --verbose force winget à écrire des lignes diagnostiques sur stdout
