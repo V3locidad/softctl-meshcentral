@@ -466,44 +466,59 @@ function doWingetInventory(data) {
         return '';
     }
     function parseWingetTable(txt) {
-        // winget list/upgrade : format texte tabulé avec entêtes et une ligne
-        // de tirets. On localise la ligne de tirets pour calculer les colonnes
-        // par offsets (l'unique méthode fiable car les valeurs contiennent des
-        // espaces).
+        // winget list/upgrade : format texte tabulé. On détecte la ligne
+        // d'entête en cherchant un mot-clé connu ('Id' ou 'ID'), puis on
+        // calcule les positions de colonnes via la position des en-têtes
+        // (Name/Nom, Id, Version, Available/Disponible, Source). Plus robuste
+        // que de chercher la ligne de tirets (qui peut être en Unicode box-
+        // drawing ─ ou en CP1252 mojibaké).
         var lines = txt.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '\n').split('\n');
-        var dashIdx = -1;
+        var headerKeywords = ['Name', 'Nom', 'Id', 'ID', 'Version', 'Available', 'Disponible', 'Source'];
+        var headerIdx = -1;
         for (var i = 0; i < lines.length; i++) {
-            if (/^-{5,}/.test(lines[i].trim())) { dashIdx = i; break; }
+            var line = lines[i];
+            if (!line || line.length < 10) continue;
+            // Heuristique : la ligne d'en-tête contient au moins 'Id' OU 'ID'
+            // entouré de séparateurs (espaces), ET 'Version'.
+            if (/(^|\s)(Id|ID)(\s|$)/.test(line) && /(^|\s)Version(\s|$)/.test(line)) {
+                headerIdx = i;
+                break;
+            }
         }
-        if (dashIdx < 1) return [];
-        var header = lines[dashIdx - 1];
-        var dashes = lines[dashIdx];
-        var cols = [], pos = 0;
-        // Découpe par groupes de tirets séparés par espace
-        var m;
-        var re = /-+/g;
-        while ((m = re.exec(dashes)) !== null) {
-            cols.push({ start: m.index, end: m.index + m[0].length, name: header.substring(m.index, m.index + m[0].length).trim() });
+        if (headerIdx < 0) return [];
+        var header = lines[headerIdx];
+        // Positions de colonnes : pour chaque mot-clé connu présent dans
+        // l'en-tête, on note son index de début.
+        var cols = [];
+        headerKeywords.forEach(function (kw) {
+            var re = new RegExp('(^|\\s)' + kw + '(\\s|$)');
+            var m = re.exec(header);
+            if (m) cols.push({ name: kw, start: m.index + (m[1] ? m[1].length : 0) });
+        });
+        cols.sort(function (a, b) { return a.start - b.start; });
+        if (cols.length < 2) return [];
+        for (var c = 0; c < cols.length; c++) {
+            cols[c].end = (c + 1 < cols.length) ? cols[c + 1].start : 9999;
         }
-        if (!cols.length) return [];
-        // Étendre les colonnes jusqu'à la suivante (ou fin de ligne)
-        for (var j = 0; j < cols.length; j++) {
-            cols[j].end = (j + 1 < cols.length) ? cols[j + 1].start : 9999;
-        }
+        // La ligne juste après l'en-tête est souvent une séparatrice (tirets ou
+        // ─). On la saute si elle ne contient pas de lettres.
+        var startIdx = headerIdx + 1;
+        if (startIdx < lines.length && lines[startIdx] && !/[A-Za-z]/.test(lines[startIdx])) startIdx++;
         var rows = [];
-        for (var k = dashIdx + 1; k < lines.length; k++) {
-            var line = lines[k];
-            if (!line || !line.trim()) continue;
-            // Stop si on tombe sur des messages winget (« No installed package… »,
-            // « X upgrades available », « no applicable upgrades », etc.)
-            if (/^\s*\d+\s+(upgrades|packages)/i.test(line)) continue;
-            if (!/\S/.test(line)) continue;
+        for (var k = startIdx; k < lines.length; k++) {
+            var ln = lines[k];
+            if (!ln || !ln.trim()) continue;
+            // Messages winget de fin : « 50 upgrades available. », etc.
+            if (/^\s*\d+\s+(upgrades|packages|paquets)/i.test(ln)) continue;
+            // Lignes de progression / barres : pas de lettres significatives
+            if (!/[A-Za-z]/.test(ln)) continue;
             var row = {};
             for (var c2 = 0; c2 < cols.length; c2++) {
-                row[cols[c2].name] = (line.substring(cols[c2].start, cols[c2].end) || '').trim();
+                row[cols[c2].name] = (ln.substring(cols[c2].start, cols[c2].end) || '').trim();
             }
-            // Heuristique : on ne garde que les lignes qui ont au moins un Id
-            if (row.Id || row.ID) rows.push(row);
+            // Une ligne valide doit avoir au moins un Id non vide
+            var idVal = row.Id || row.ID;
+            if (idVal && idVal.length > 1) rows.push(row);
         }
         return rows;
     }
