@@ -182,6 +182,9 @@ function doWingetInstall(data) {
         cmdLine += ' --id ' + packageId + ' --exact';
     }
     cmdLine += ' --silent --accept-source-agreements --accept-package-agreements';
+    // --verbose force winget à écrire des lignes diagnostiques sur stdout
+    // même en mode silent — sinon on capture un log vide quand il bail tôt.
+    cmdLine += ' --verbose';
     // --scope machine n'est dispo qu'à l'install. upgrade hérite du scope
     // d'origine, uninstall n'en a pas besoin.
     if (mode === 'install') cmdLine += ' --scope machine';
@@ -246,7 +249,10 @@ function doWingetInstall(data) {
                 // Le motif dépend du verbe : "déjà installé" en install, "déjà
                 // à jour" en upgrade, etc. Suggérer --force quand pertinent.
                 var isInstall = (mode === 'install');
-                var hint = isInstall ? ' — cocher Forcer pour réinstaller' : '';
+                var forced = !!data.force;
+                // Hint contextuel : ne pas suggérer "cocher Forcer" si c'est
+                // déjà coché — sinon l'utilisateur tourne en rond.
+                var hint = (isInstall && !forced) ? ' — cocher Forcer pour réinstaller' : '';
                 if (code === -1978335215 /* 0x8A150011 NO_APPLICABLE_INSTALLER */) {
                     L('déjà installé / aucun installeur applicable');
                     return done(code, isInstall ? 'déjà installé' + hint : 'aucun installeur applicable', true);
@@ -255,7 +261,15 @@ function doWingetInstall(data) {
                 if (code === -1978335212 /* 0x8A150014 NO_APPLICABLE_UPDATE_FOUND */) { L('rien à mettre à jour'); return done(code, 'rien à mettre à jour', true); }
                 if (code === -1978335138 /* 0x8A15005E UPDATE_NOT_APPLICABLE */)   {
                     L('paquet pas géré par winget');
-                    return done(code, isInstall ? 'déjà installé hors winget' + hint : 'paquet installé hors winget — non mis à jour', true);
+                    var msg;
+                    if (isInstall) {
+                        msg = forced
+                            ? 'déjà installé hors winget — winget refuse de réinstaller par-dessus'
+                            : 'déjà installé hors winget' + hint;
+                    } else {
+                        msg = 'paquet installé hors winget — non mis à jour';
+                    }
+                    return done(code, msg, true);
                 }
                 if (code === -1978335164 /* 0x8A150044 UPGRADE_VERSION_NOT_NEWER */) { L('déjà à la dernière version'); return done(code, 'déjà à la dernière version', true); }
                 done(typeof code === 'number' ? code : -1);
