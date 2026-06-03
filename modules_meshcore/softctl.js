@@ -185,9 +185,10 @@ function doWingetInstall(data) {
     // --verbose force winget à écrire des lignes diagnostiques sur stdout
     // même en mode silent — sinon on capture un log vide quand il bail tôt.
     cmdLine += ' --verbose';
-    // --scope machine n'est dispo qu'à l'install. upgrade hérite du scope
-    // d'origine, uninstall n'en a pas besoin.
-    if (mode === 'install') cmdLine += ' --scope machine';
+    // Pas de --scope machine : la plupart des manifests winget (dont
+    // Google.Chrome) ne déclarent pas explicitement le scope, et le flag
+    // filtre les installeurs jusqu'à 0 match → 0x8A15005E. On tourne en
+    // SYSTEM, l'install est machine-wide de fait.
     // --force : skip checks divers (signature, dépendances ignorables).
     // --uninstall-previous : désinstalle d'abord la version en place
     //   (la seule manière de reprendre la main quand un paquet a été posé
