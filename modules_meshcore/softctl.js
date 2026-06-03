@@ -46,6 +46,9 @@ function consoleaction(args, rights, sessionid, parent) {
             case 'wingetInstall':
                 doWingetInstall(args);
                 return 'winget started';
+            case 'wingetInventory':
+                doWingetInventory(args);
+                return 'inventory started';
             default:
                 return 'softctl: action inconnue ' + fnname;
         }
@@ -425,4 +428,115 @@ function rmRf(p) {
     } else {
         try { fs.unlinkSync(p); } catch (e) {}
     }
+}
+
+function doWingetInventory(data) {
+    // Récupère la liste des paquets installés (winget list) et la liste des
+    // mises à jour disponibles (winget upgrade --include-unknown). Renvoyé
+    // au serveur via pluginaction='wingetInventoryResult' avec un dispatchId.
+    var fs = require('fs');
+    var cp = require('child_process');
+    var dispatchId = data.dispatchId;
+    function send(payload) {
+        var p = { pluginaction: 'wingetInventoryResult', dispatchId: dispatchId };
+        Object.keys(payload).forEach(function (k) { p[k] = payload[k]; });
+        reply(p);
+    }
+    var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
+    var programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
+    var wingetExe = '';
+    try {
+        var wapps = programFiles + '\\WindowsApps';
+        var entries = fs.readdirSync(wapps);
+        for (var i = 0; i < entries.length; i++) {
+            if (/^Microsoft\.DesktopAppInstaller_/i.test(entries[i])) {
+                var c = wapps + '\\' + entries[i] + '\\winget.exe';
+                if (fs.existsSync(c)) { wingetExe = c; break; }
+            }
+        }
+    } catch (e) {}
+    if (!wingetExe) return send({ error: 'winget non installé (App Installer requis)' });
+
+    var tmpRoot = (process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp');
+    function toStr(buf) {
+        if (typeof buf === 'string') return buf;
+        if (!buf) return '';
+        try { return buf.toString('utf8'); } catch (_) {}
+        try { return String.fromCharCode.apply(null, buf); } catch (_) {}
+        return '';
+    }
+    function parseWingetTable(txt) {
+        // winget list/upgrade : format texte tabulé avec entêtes et une ligne
+        // de tirets. On localise la ligne de tirets pour calculer les colonnes
+        // par offsets (l'unique méthode fiable car les valeurs contiennent des
+        // espaces).
+        var lines = txt.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '\n').split('\n');
+        var dashIdx = -1;
+        for (var i = 0; i < lines.length; i++) {
+            if (/^-{5,}/.test(lines[i].trim())) { dashIdx = i; break; }
+        }
+        if (dashIdx < 1) return [];
+        var header = lines[dashIdx - 1];
+        var dashes = lines[dashIdx];
+        var cols = [], pos = 0;
+        // Découpe par groupes de tirets séparés par espace
+        var m;
+        var re = /-+/g;
+        while ((m = re.exec(dashes)) !== null) {
+            cols.push({ start: m.index, end: m.index + m[0].length, name: header.substring(m.index, m.index + m[0].length).trim() });
+        }
+        if (!cols.length) return [];
+        // Étendre les colonnes jusqu'à la suivante (ou fin de ligne)
+        for (var j = 0; j < cols.length; j++) {
+            cols[j].end = (j + 1 < cols.length) ? cols[j + 1].start : 9999;
+        }
+        var rows = [];
+        for (var k = dashIdx + 1; k < lines.length; k++) {
+            var line = lines[k];
+            if (!line || !line.trim()) continue;
+            // Stop si on tombe sur des messages winget (« No installed package… »,
+            // « X upgrades available », « no applicable upgrades », etc.)
+            if (/^\s*\d+\s+(upgrades|packages)/i.test(line)) continue;
+            if (!/\S/.test(line)) continue;
+            var row = {};
+            for (var c2 = 0; c2 < cols.length; c2++) {
+                row[cols[c2].name] = (line.substring(cols[c2].start, cols[c2].end) || '').trim();
+            }
+            // Heuristique : on ne garde que les lignes qui ont au moins un Id
+            if (row.Id || row.ID) rows.push(row);
+        }
+        return rows;
+    }
+
+    function runWinget(args, cb) {
+        var stamp = Date.now() + '_' + Math.floor(Math.random() * 1e9);
+        var outFile = tmpRoot + '\\softctl_wgi_' + stamp + '.log';
+        var batFile = tmpRoot + '\\softctl_wgi_' + stamp + '.bat';
+        var line = '"' + wingetExe + '" ' + args + ' > "' + outFile + '" 2>&1';
+        try { fs.writeFileSync(batFile, '@echo off\r\n' + line + '\r\n'); }
+        catch (e) { return cb(e, ''); }
+        var exe = windir + '\\System32\\cmd.exe';
+        try {
+            var child = cp.execFile(exe, ['/c', batFile]);
+            var done2 = false;
+            function finish(err) {
+                if (done2) return; done2 = true;
+                var out = '';
+                try { if (fs.existsSync(outFile)) out = toStr(fs.readFileSync(outFile, 'utf8')); } catch (_) {}
+                try { fs.unlinkSync(outFile); } catch (_) {}
+                try { fs.unlinkSync(batFile); } catch (_) {}
+                cb(err, out);
+            }
+            child.on('exit', function () { finish(null); });
+            setTimeout(function () { try { child.kill(); } catch (_) {} finish('timeout'); }, 120 * 1000);
+        } catch (e) { cb(e, ''); }
+    }
+
+    runWinget('list --source winget --accept-source-agreements', function (err1, out1) {
+        var installed = parseWingetTable(out1 || '');
+        runWinget('upgrade --include-unknown --source winget --accept-source-agreements', function (err2, out2) {
+            var upgrades = parseWingetTable(out2 || '');
+            send({ installed: installed, upgrades: upgrades });
+        });
+    });
 }

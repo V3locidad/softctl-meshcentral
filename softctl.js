@@ -19,6 +19,7 @@ const crypto = require('crypto');
 const downloadTokens = {};
 const uploadTokens = {};
 const reportTokens = {};      // token -> { deploymentId, softId, nodeId, expires }
+const inventoryWaiters = {};  // dispatchId -> { res, expires }
 const TOKEN_TTL_MS = 30 * 60 * 1000;
 const REPORT_TTL_MS = 2 * 60 * 60 * 1000;  // 2 h, le temps qu'un gros install termine
 
@@ -214,6 +215,21 @@ module.exports.softctl = function (parent) {
         try {
             if (!command) return;
             if (command.pluginaction === 'pong') return;
+            if (command.pluginaction === 'wingetInventoryResult') {
+                const w = inventoryWaiters[command.dispatchId];
+                if (!w) return;
+                delete inventoryWaiters[command.dispatchId];
+                try {
+                    w.res.setHeader('Content-Type', 'application/json');
+                    w.res.end(JSON.stringify({
+                        ok: !command.error,
+                        error: command.error || undefined,
+                        installed: command.installed || [],
+                        upgrades: command.upgrades || [],
+                    }));
+                } catch (e) {}
+                return;
+            }
             if (command.pluginaction !== 'installComplete') return;
             const tok = command.dispatchId;
             if (!tok) return;
@@ -773,6 +789,36 @@ module.exports.softctl = function (parent) {
             } catch (e) {
                 return sendJson(res, 200, { ok: false, error: e.message });
             }
+        }
+
+        if (action === 'wingetInventory') {
+            // Inventaire winget d'un poste : installed + upgrades dispo.
+            // Réponse asynchrone : on stocke `res` dans inventoryWaiters et
+            // on répond depuis serveraction quand l'agent renvoie.
+            const nodeId = String(req.query.nodeId || '');
+            const ws2 = obj.meshServer && obj.meshServer.webserver;
+            const wsagents2 = ws2 && ws2.wsagents;
+            const target = wsagents2 && wsagents2[nodeId];
+            if (!target || typeof target.send !== 'function') {
+                return sendJson(res, 200, { ok: false, error: 'agent introuvable/déconnecté' });
+            }
+            const dispatchId = 'inv-' + crypto.randomBytes(8).toString('hex');
+            inventoryWaiters[dispatchId] = { res: res, expires: Date.now() + 180000 };
+            // GC : si l'agent ne répond pas dans 3 min, on libère et on
+            // renvoie un timeout pour ne pas garder le HTTP pendu.
+            setTimeout(function () {
+                const w = inventoryWaiters[dispatchId];
+                if (!w) return;
+                delete inventoryWaiters[dispatchId];
+                try { sendJson(w.res, 200, { ok: false, error: 'timeout agent (3 min)' }); } catch (_) {}
+            }, 180000);
+            try {
+                target.send(JSON.stringify({ action: 'plugin', plugin: 'softctl', pluginaction: 'wingetInventory', dispatchId: dispatchId }));
+            } catch (e) {
+                delete inventoryWaiters[dispatchId];
+                return sendJson(res, 200, { ok: false, error: e.message });
+            }
+            return;
         }
 
         if (action === 'wingetCatalog') {

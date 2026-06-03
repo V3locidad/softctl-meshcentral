@@ -64,6 +64,7 @@
 
 <div class="bar">
   <span style="flex:1"></span>
+  <button id="invBtn" disabled title="Sélectionner exactement 1 poste">🔍 Inventaire poste</button>
   <button id="wingetBtn">📦 Winget</button>
   <button id="historyBtn">Historique</button>
   <button id="refreshBtn" class="primary">Rafraîchir</button>
@@ -292,6 +293,11 @@
                                 + ' · ' + na + ' poste' + (na > 1 ? 's' : '') + ' sélectionné' + (na > 1 ? 's' : '');
     $('deployBtn').disabled = !(ns && na);
     $('dryRunBtn').disabled = !(ns && na);
+    var inv = $('invBtn');
+    if (inv) {
+      inv.disabled = (na !== 1);
+      inv.title = (na === 1) ? 'Voir installés + MAJ winget du poste' : 'Sélectionner exactement 1 poste';
+    }
   }
 
   function load() {
@@ -710,6 +716,105 @@
     });
   }
   $('wingetBtn').onclick = openWinget;
+
+  function openInventory() {
+    var nodeIds = Object.keys(agentSel);
+    if (nodeIds.length !== 1) return;
+    var nodeId = nodeIds[0];
+    var ag = agents.find(function (a) { return a.id === nodeId; });
+    var label = ag ? ag.name : nodeId.slice(0, 12);
+    var headHtml =
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
+      + '<h3 style="margin:0;flex:1">🔍 Inventaire winget — ' + escapeHtml(label) + '</h3>'
+      + '<button id="invRefresh">Rafraîchir</button>'
+      + '<button id="invClose">Fermer</button>'
+      + '</div>';
+    var body = '<div id="invBody"><div class="empty">Interrogation de l\'agent…</div></div>';
+    var bg = showModal(headHtml + body);
+    bg.querySelector('.modal').style.maxWidth = '920px';
+    bg.querySelector('.modal').style.width = '95%';
+    bg.querySelector('#invClose').onclick = function () { closeModal(bg); };
+
+    function fetchAndRender() {
+      var box = bg.querySelector('#invBody');
+      box.innerHTML = '<div class="empty">Interrogation de l\'agent (jusqu\'à 3 min)…</div>';
+      api('wingetInventory', { nodeId: nodeId }).then(function (r) {
+        if (!r.ok) {
+          box.innerHTML = '<div class="empty" style="color:#721c24">Erreur : ' + escapeHtml(r.error || 'inconnue') + '</div>';
+          return;
+        }
+        var installed = r.installed || [];
+        var upgrades = r.upgrades || [];
+        // Filtre installed = lignes avec Id non vide ; idem upgrades
+        function colName(row, candidates) {
+          for (var i = 0; i < candidates.length; i++) if (row[candidates[i]] != null) return candidates[i];
+          return null;
+        }
+        function renderTable(rows, mode) {
+          if (!rows.length) return '<div class="empty">Aucun.</div>';
+          var nameC = colName(rows[0], ['Name', 'Nom']);
+          var idC   = colName(rows[0], ['Id', 'ID']);
+          var verC  = colName(rows[0], ['Version']);
+          var avC   = colName(rows[0], ['Available', 'Disponible', 'Disponibilité']);
+          var srcC  = colName(rows[0], ['Source']);
+          var html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'
+                   + '<th style="text-align:left;padding:4px;border-bottom:2px solid #ccc">Nom</th>'
+                   + '<th style="text-align:left;padding:4px;border-bottom:2px solid #ccc">Id</th>'
+                   + '<th style="text-align:left;padding:4px;border-bottom:2px solid #ccc">Version</th>'
+                   + (mode === 'upgrade' ? '<th style="text-align:left;padding:4px;border-bottom:2px solid #ccc">→ Disponible</th>' : '')
+                   + '<th style="text-align:left;padding:4px;border-bottom:2px solid #ccc">Source</th>'
+                   + '<th style="padding:4px;border-bottom:2px solid #ccc">Action</th>'
+                   + '</tr></thead><tbody>';
+          rows.forEach(function (row) {
+            var id = idC ? row[idC] : '';
+            if (!id) return;
+            var name = nameC ? row[nameC] : '';
+            var ver = verC ? row[verC] : '';
+            var av = avC ? row[avC] : '';
+            var src = srcC ? row[srcC] : '';
+            html += '<tr>'
+                  + '<td style="padding:4px;border-bottom:1px solid #f0f0f0">' + escapeHtml(name) + '</td>'
+                  + '<td style="padding:4px;border-bottom:1px solid #f0f0f0;font-family:monospace;font-size:12px">' + escapeHtml(id) + '</td>'
+                  + '<td style="padding:4px;border-bottom:1px solid #f0f0f0">' + escapeHtml(ver) + '</td>'
+                  + (mode === 'upgrade' ? '<td style="padding:4px;border-bottom:1px solid #f0f0f0;color:#0a6b1a;font-weight:bold">' + escapeHtml(av) + '</td>' : '')
+                  + '<td style="padding:4px;border-bottom:1px solid #f0f0f0">' + escapeHtml(src) + '</td>'
+                  + '<td style="padding:4px;border-bottom:1px solid #f0f0f0;text-align:right">'
+                  + (mode === 'upgrade'
+                      ? '<button class="invAct" data-pkg="' + escapeHtml(id) + '" data-mode="upgrade">⬆ MAJ</button>'
+                      : '<button class="invAct" data-pkg="' + escapeHtml(id) + '" data-mode="uninstall">Désinst.</button>')
+                  + '</td>'
+                  + '</tr>';
+          });
+          html += '</tbody></table>';
+          return html;
+        }
+        var upgHead = '<div style="margin:8px 0 4px 0;font-weight:bold">⬆ Mises à jour disponibles <span class="pill">' + upgrades.length + '</span>'
+                    + (upgrades.length ? ' <button id="invUpgAll" style="margin-left:8px">⬆ Tout mettre à jour</button>' : '')
+                    + '</div>';
+        var insHead = '<div style="margin:14px 0 4px 0;font-weight:bold">📚 Logiciels installés <span class="pill">' + installed.length + '</span></div>';
+        box.innerHTML = upgHead + renderTable(upgrades, 'upgrade') + insHead + renderTable(installed, 'installed');
+
+        function dispatchAction(mode, packageIds) {
+          if (!confirm('Confirmer : ' + mode + ' ' + (packageIds[0] === '*' ? '(tout)' : packageIds.join(', ')) + ' sur ' + label + ' ?')) return;
+          var body = { nodeIds: [nodeId], mode: mode, force: false };
+          if (packageIds[0] === '*') body.packageIds = ['*']; else body.packageIds = packageIds;
+          api('wingetDeploy', null, body).then(function (rr) {
+            if (rr.error) { alert('Erreur: ' + rr.error); return; }
+            closeModal(bg);
+            if (rr.deploymentId) followDeployment(rr.deploymentId);
+          });
+        }
+        Array.prototype.forEach.call(box.querySelectorAll('.invAct'), function (btn) {
+          btn.onclick = function () { dispatchAction(btn.getAttribute('data-mode'), [btn.getAttribute('data-pkg')]); };
+        });
+        var upgAll = box.querySelector('#invUpgAll');
+        if (upgAll) upgAll.onclick = function () { dispatchAction('upgrade-all', ['*']); };
+      });
+    }
+    bg.querySelector('#invRefresh').onclick = fetchAndRender;
+    fetchAndRender();
+  }
+  $('invBtn').onclick = openInventory;
 
   // ---- modal helpers ----
   function showModal(html) {
