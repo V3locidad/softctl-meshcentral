@@ -225,17 +225,24 @@ function doWingetInstall(data) {
     }
     var argv = ['/c', batFile];
     L('exec cmd /c ' + cmdLine);
+    function toStr(buf) {
+        if (typeof buf === 'string') return buf;
+        if (!buf) return '';
+        try { return buf.toString('utf8'); } catch (_) {}
+        try { return String.fromCharCode.apply(null, buf); } catch (_) {}
+        return '';
+    }
     function readWingetLog() {
         try {
             if (fs.existsSync(logFile)) {
-                var txt = fs.readFileSync(logFile, 'utf8');
+                var txt = toStr(fs.readFileSync(logFile, 'utf8'));
                 txt = txt.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '\n');
                 txt = txt.split('\n').map(function (s) { return s.trim(); }).filter(Boolean).slice(-15).join(' | ');
                 if (txt) L('winget stdout: ' + txt);
                 try { fs.unlinkSync(logFile); } catch (_) {}
             }
             if (fs.existsSync(wingetLogFile)) {
-                var diag = fs.readFileSync(wingetLogFile, 'utf8');
+                var diag = toStr(fs.readFileSync(wingetLogFile, 'utf8'));
                 // Le log winget est riche : on garde les 25 dernières lignes
                 // non vides, suffisant pour voir la raison du bail.
                 diag = diag.replace(/\r/g, '\n').split('\n').map(function (s) { return s.trim(); }).filter(Boolean).slice(-25);
