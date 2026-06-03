@@ -171,6 +171,8 @@ module.exports.softctl = function (parent) {
     function listAgents(cb) {
         const db = obj.meshServer && obj.meshServer.db;
         if (!db || typeof db.GetAllType !== 'function') return cb(new Error('MC DB inaccessible'));
+        // wsagents : map nodeId -> websocket actif. Présence = poste en ligne.
+        const wsagents = (obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents) || {};
         db.GetAllType('mesh', function (meshErr, meshDocs) {
             if (meshErr) return cb(meshErr);
             const meshById = {};
@@ -189,6 +191,7 @@ module.exports.softctl = function (parent) {
                         family: family,
                         arch: (d.agent && AGENT_ARCH[d.agent.id]) || '',
                         lastConnect: d.lastConnectTime || 0,
+                        online: !!wsagents[d._id],
                     };
                 });
                 agents.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { numeric: true }));

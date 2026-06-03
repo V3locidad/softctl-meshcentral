@@ -36,6 +36,9 @@
   #deployBar .info { flex: 1; }
   #preview { margin-top: 10px; background: #111; color: #ddd; font-family: Menlo, Consolas, monospace; font-size: 12px; padding: 8px; border-radius: 4px; max-height: 220px; overflow: auto; white-space: pre-wrap; display: none; flex: 0 0 auto; }
   .badgeOs { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #e2e3e5; color: #383d41; margin-right: 4px; }
+  .statusDot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; display: inline-block; box-shadow: 0 0 0 1px rgba(0,0,0,0.15); }
+  .statusDot.on  { background: #2ecc40; }
+  .statusDot.off { background: #d9534f; }
   .badgeWarn { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #fff3cd; color: #856404; margin-left: 4px; }
   .badgeArch { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #e2e3e5; color: #383d41; margin-left: 4px; font-family: Menlo, Consolas, monospace; }
   .resCell { padding: 3px 6px; border-radius: 3px; font-size: 11px; display: inline-block; min-width: 60px; text-align: center; }
@@ -186,8 +189,11 @@
     $('agentList').innerHTML = rows.map(function (a) {
       var checked = agentSel[a.id] ? ' checked' : '';
       var sel = agentSel[a.id] ? ' selected' : '';
+      var dotCls = a.online ? 'on' : 'off';
+      var dotTitle = a.online ? 'En ligne' : 'Hors-ligne';
       return '<div class="row' + sel + '" data-id="' + escapeHtml(a.id) + '">'
            +   '<input type="checkbox" class="chk"' + checked + '>'
+           +   '<span class="statusDot ' + dotCls + '" title="' + dotTitle + '"></span>'
            +   '<div class="main">'
            +     '<div class="title">' + escapeHtml(a.name) + '</div>'
            +     '<div class="sub">'
