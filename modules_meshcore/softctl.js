@@ -465,6 +465,44 @@ function findWingetExe() {
     return '';
 }
 
+function checkWingetVersion(wingetExe, cb) {
+    var cp = require('child_process');
+    var fs = require('fs');
+    var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
+    var tmpRoot = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
+    var stamp = Date.now() + '_' + Math.floor(Math.random() * 1e9);
+    var outFile = tmpRoot + '\\softctl_wver_' + stamp + '.txt';
+    var batFile = tmpRoot + '\\softctl_wver_' + stamp + '.bat';
+    try { fs.writeFileSync(batFile, '@echo off\r\n"' + wingetExe + '" --version > "' + outFile + '" 2>&1\r\n'); }
+    catch (e) { return cb(''); }
+    try {
+        var child = cp.execFile(windir + '\\System32\\cmd.exe', ['/c', batFile]);
+        var done2 = false;
+        function finish() {
+            if (done2) return; done2 = true;
+            var out = '';
+            try { if (fs.existsSync(outFile)) out = fs.readFileSync(outFile, 'utf8').toString(); } catch (_) {}
+            try { fs.unlinkSync(outFile); } catch (_) {}
+            try { fs.unlinkSync(batFile); } catch (_) {}
+            var m = String(out).match(/v?(\d+\.\d+(?:\.\d+)?)/);
+            cb(m ? m[1] : '');
+        }
+        child.on('exit', finish);
+        setTimeout(finish, 8000);
+    } catch (e) { cb(''); }
+}
+
+function versionLess(a, b) {
+    if (!a) return true;
+    var pa = String(a).split('.').map(function (n) { return parseInt(n, 10) || 0; });
+    var pb = String(b).split('.').map(function (n) { return parseInt(n, 10) || 0; });
+    for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+        var da = (pa[i] || 0) - (pb[i] || 0);
+        if (da !== 0) return da < 0;
+    }
+    return false;
+}
+
 function installWingetSystem(L, cb) {
     // Télécharge VCLibs + winget MSIXBundle puis provisionne pour tous les
     // utilisateurs via DISM. Fonctionne en SYSTEM.
@@ -554,19 +592,42 @@ function doWingetInventory(data) {
     var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
 
     var wingetExe = findWingetExe();
-    if (!wingetExe) {
-        // Auto-install si demandé (par défaut oui).
-        if (data.autoInstall === false) return send({ error: 'winget non installé (App Installer requis)' });
-        L('winget absent — auto-install en cours');
-        return installWingetSystem(L, function (instErr) {
-            if (instErr) return send({ error: 'auto-install winget échoué : ' + instErr, log: log.join('\n') });
-            wingetExe = findWingetExe();
-            if (!wingetExe) return send({ error: 'winget toujours introuvable après install', log: log.join('\n') });
-            L('winget installé : ' + wingetExe);
-            continueInventory();
+    function ensureWingetReady(cb) {
+        if (!wingetExe) {
+            if (data.autoInstall === false) return cb('winget non installé (App Installer requis)');
+            L('winget absent — auto-install');
+            return installWingetSystem(L, function (instErr) {
+                if (instErr) return cb('auto-install échoué : ' + instErr);
+                wingetExe = findWingetExe();
+                if (!wingetExe) return cb('winget toujours introuvable après install');
+                L('winget installé : ' + wingetExe);
+                cb(null);
+            });
+        }
+        // Check version : si trop vieille, upgrade.
+        checkWingetVersion(wingetExe, function (ver) {
+            L('winget version : ' + (ver || '?'));
+            if (versionLess(ver, '1.4')) {
+                L('winget trop ancien (' + ver + ') — upgrade vers la dernière');
+                installWingetSystem(L, function (instErr) {
+                    if (instErr) {
+                        L('upgrade winget échoué : ' + instErr + ' — on continue avec l\'ancien');
+                        return cb(null);
+                    }
+                    wingetExe = findWingetExe();
+                    L('winget upgrade OK : ' + wingetExe);
+                    cb(null);
+                });
+                return;
+            }
+            cb(null);
         });
     }
-    continueInventory();
+    ensureWingetReady(function (err) {
+        if (err) return send({ error: err, log: log.join('\n') });
+        continueInventory();
+    });
+    return;
     function continueInventory() {
 
     var tmpRoot = (process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp');
