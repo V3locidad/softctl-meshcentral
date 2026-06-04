@@ -19,7 +19,8 @@ const crypto = require('crypto');
 const downloadTokens = {};
 const uploadTokens = {};
 const reportTokens = {};      // token -> { deploymentId, softId, nodeId, expires }
-const inventoryWaiters = {};  // dispatchId -> { res, expires }
+const inventoryWaiters = {};  // dispatchId -> { res, expires, nodeId }
+const inventoryProgress = {}; // dispatchId -> { tail, lastUpdate }
 const wingetBundleTokens = {}; // token -> { file, expires }
 const WINGET_BUNDLE = {
     vclibs: { name: 'Microsoft.VCLibs.x64.14.00.Desktop.appx', url: 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' },
@@ -226,10 +227,18 @@ module.exports.softctl = function (parent) {
         try {
             if (!command) return;
             if (command.pluginaction === 'pong') return;
+            if (command.pluginaction === 'wingetInventoryProgress') {
+                inventoryProgress[command.dispatchId] = {
+                    tail: command.tail || (command.line ? [command.line] : []),
+                    lastUpdate: Date.now(),
+                };
+                return;
+            }
             if (command.pluginaction === 'wingetInventoryResult') {
                 const w = inventoryWaiters[command.dispatchId];
                 if (!w) return;
                 delete inventoryWaiters[command.dispatchId];
+                delete inventoryProgress[command.dispatchId];
                 try {
                     w.res.setHeader('Content-Type', 'application/json');
                     w.res.end(JSON.stringify({
@@ -936,6 +945,22 @@ module.exports.softctl = function (parent) {
             }
         }
 
+        if (action === 'wingetInventoryProgress') {
+            const nodeIdQ = String(req.query.nodeId || '');
+            // Cherche un dispatchId en cours pour ce node
+            let found = null;
+            Object.keys(inventoryWaiters).forEach((d) => {
+                if (inventoryWaiters[d].nodeId === nodeIdQ) found = d;
+            });
+            if (!found) return sendJson(res, 200, { inProgress: false });
+            const prog = inventoryProgress[found] || { tail: [], lastUpdate: 0 };
+            return sendJson(res, 200, {
+                inProgress: true,
+                tail: prog.tail,
+                ageSec: Math.round((Date.now() - prog.lastUpdate) / 1000),
+            });
+        }
+
         if (action === 'wingetBundleStatus') {
             // Diag : liste l'état du cache + force-prefetch si ?refresh=1
             const refresh = req.query.refresh === '1';
@@ -967,7 +992,8 @@ module.exports.softctl = function (parent) {
             }
             // Timeout étendu : si on doit télécharger le bundle, ça prend du temps.
             const dispatchId = 'inv-' + crypto.randomBytes(8).toString('hex');
-            inventoryWaiters[dispatchId] = { res: res, expires: Date.now() + 15 * 60 * 1000 };
+            inventoryWaiters[dispatchId] = { res: res, expires: Date.now() + 15 * 60 * 1000, nodeId: nodeId };
+            inventoryProgress[dispatchId] = { tail: ['démarrage…'], lastUpdate: Date.now() };
             setTimeout(function () {
                 const w = inventoryWaiters[dispatchId];
                 if (!w) return;

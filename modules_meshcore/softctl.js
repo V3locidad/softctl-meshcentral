@@ -607,7 +607,24 @@ function doWingetInventory(data) {
     var cp = require('child_process');
     var dispatchId = data.dispatchId;
     var log = [];
-    function L(m) { log.push(m); dbg(m); }
+    var lastPing = 0;
+    function L(m) {
+        log.push(m); dbg(m);
+        // Ping périodique vers le serveur pour que l'UI puisse afficher
+        // l'avancement (sinon on a juste "Interrogation…" sans signal de vie).
+        var now = Date.now();
+        if (now - lastPing > 3000) {
+            lastPing = now;
+            try {
+                reply({
+                    pluginaction: 'wingetInventoryProgress',
+                    dispatchId: dispatchId,
+                    line: m,
+                    tail: log.slice(-5),
+                });
+            } catch (_) {}
+        }
+    }
     function send(payload) {
         var p = { pluginaction: 'wingetInventoryResult', dispatchId: dispatchId };
         Object.keys(payload).forEach(function (k) { p[k] = payload[k]; });
