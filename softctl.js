@@ -298,15 +298,16 @@ module.exports.softctl = function (parent) {
         return targets.length;
     }
 
-    // Boucle 5 min : scan + auto-fix si activé
-    setInterval(() => {
+    // Boucle 2 min : scan + auto-fix automatique (pas d'action utilisateur requise).
+    function maintenanceTick() {
         kickWingetScan(false);
         if (wingetMaintenanceState.autoEnabled) {
-            setTimeout(kickWingetFix, 15000);  // laisser arriver les résultats
+            setTimeout(kickWingetFix, 10000);  // laisser arriver les résultats
         }
-    }, 5 * 60 * 1000);
-    // Premier scan 30s après démarrage
-    setTimeout(() => { kickWingetScan(true); }, 30000);
+    }
+    setInterval(maintenanceTick, 2 * 60 * 1000);
+    // Premier scan 15s après démarrage MC
+    setTimeout(maintenanceTick, 15000);
 
     // Enregistre un endpoint dédié pour les uploads, en dehors de pluginadmin.ashx
     // dont MC refuse les POST/PUT (CSRF-like). On utilise un token d'usage unique
@@ -916,7 +917,21 @@ module.exports.softctl = function (parent) {
         try { wingetMaintenanceState.baseUrl = req.protocol + '://' + req.get('host'); } catch (_) {}
 
         if (action === 'wingetStatus') {
-            // Renvoie le cache + flag de configuration.
+            // Renvoie le cache + flag de configuration. Déclenche aussi un scan
+            // si certains postes en ligne n'ont pas de cache frais (ouverture
+            // plugin = signal de présence utilisateur).
+            try {
+                const wsagents = (obj.meshServer.webserver.wsagents) || {};
+                let needsScan = false;
+                Object.keys(wsagents).forEach((nid) => {
+                    const c = wingetStatusCache[nid];
+                    if (!c || (Date.now() - c.lastCheck > WINGET_STATUS_TTL)) needsScan = true;
+                });
+                if (needsScan) {
+                    kickWingetScan(false);
+                    if (wingetMaintenanceState.autoEnabled) setTimeout(kickWingetFix, 10000);
+                }
+            } catch (_) {}
             const out = {};
             Object.keys(wingetStatusCache).forEach((nid) => {
                 const c = wingetStatusCache[nid];

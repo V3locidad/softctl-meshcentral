@@ -373,20 +373,20 @@
     var total = missing + old;
     if (!total) { bar.style.display = 'none'; return; }
     bar.style.display = 'flex';
-    var verb = wingetHasBootstrap ? '▶ Installer maintenant via NAS' : 'ℹ️ Crée un soft "winget-bootstrap" pour activer l\'install auto';
-    var btn = wingetHasBootstrap ? '<button id="wgFixBtn" class="primary" style="margin-left:auto">' + verb + '</button>' : '<span style="margin-left:auto;font-size:11px">' + verb + '</span>';
-    bar.innerHTML = '⚠ ' + total + ' poste(s) en ligne sans Winget '
-                  + '(' + missing + ' manquants, ' + old + ' trop anciens)' + btn;
-    var b = document.getElementById('wgFixBtn');
-    if (b) b.onclick = function () {
-      if (!confirm('Déployer winget-bootstrap sur ' + total + ' poste(s) ?')) return;
-      b.disabled = true; b.textContent = 'Déploiement…';
-      api('wingetFixAll').then(function (r) {
-        b.textContent = '✓ ' + (r.dispatched || 0) + ' déploiements lancés';
-        setTimeout(refreshWingetStatus, 60000);
-      });
-    };
+    if (wingetHasBootstrap) {
+      bar.style.background = '#d1ecf1';
+      bar.style.borderColor = '#bee5eb';
+      bar.style.color = '#0c5460';
+      bar.innerHTML = '🔧 Installation Winget automatique en cours sur ' + total + ' poste(s) (' + missing + ' manquants, ' + old + ' trop anciens)<span style="margin-left:auto;font-size:11px">Re-vérification toutes les 2 min</span>';
+    } else {
+      bar.style.background = '#fff3cd';
+      bar.style.borderColor = '#ffeeba';
+      bar.style.color = '#856404';
+      bar.innerHTML = '⚠ ' + total + ' poste(s) en ligne sans Winget. Crée un soft <b>winget-bootstrap</b> au catalogue pour activer l\'install auto.';
+    }
   }
+  // Rafraîchit les badges toutes les 30s pour suivre l'évolution.
+  setInterval(refreshWingetStatus, 30000);
 
   $('softFilter').oninput = renderSoft;
   $('agentFilter').oninput = renderAgents;
