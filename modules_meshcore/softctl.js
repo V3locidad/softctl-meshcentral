@@ -523,18 +523,31 @@ function installWingetSystem(L, cb) {
         '$work = "' + workDir.replace(/\\/g, '\\\\') + '"',
         'New-Item -ItemType Directory -Force -Path $work | Out-Null',
         '$vcUrl = "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx"',
+        '$xamlUrl = "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx"',
         '$wgUrl = "https://aka.ms/getwinget"',
         '$vcFile = Join-Path $work "vclibs.appx"',
+        '$xamlFile = Join-Path $work "uixaml.appx"',
         '$wgFile = Join-Path $work "winget.msixbundle"',
-        'Write-Output "Téléchargement VCLibs"',
+        '$dismLog = Join-Path $work "dism.log"',
+        'Write-Output "DL VCLibs"',
         'Invoke-WebRequest -Uri $vcUrl -OutFile $vcFile -UseBasicParsing',
-        'Write-Output "Téléchargement winget"',
+        'Write-Output "DL UI.Xaml"',
+        'try { Invoke-WebRequest -Uri $xamlUrl -OutFile $xamlFile -UseBasicParsing } catch { Write-Output ("UI.Xaml DL warn: " + $_.Exception.Message); $xamlFile = $null }',
+        'Write-Output "DL winget"',
         'Invoke-WebRequest -Uri $wgUrl -OutFile $wgFile -UseBasicParsing',
         'Write-Output "DISM provision"',
         '$dismExe = Join-Path $env:WINDIR "System32\\dism.exe"',
-        '& $dismExe /Online /Quiet /Add-ProvisionedAppxPackage /PackagePath:"$wgFile" /DependencyPackagePath:"$vcFile" /SkipLicense',
+        '$dismArgs = @("/Online", "/Add-ProvisionedAppxPackage", "/PackagePath:$wgFile", "/DependencyPackagePath:$vcFile", "/SkipLicense", "/LogPath:$dismLog", "/LogLevel:4")',
+        'if ($xamlFile -and (Test-Path $xamlFile)) { $dismArgs += "/DependencyPackagePath:$xamlFile" }',
+        '& $dismExe @dismArgs 2>&1 | Out-String -Stream | ForEach-Object { Write-Output $_ }',
         'Write-Output "DISM exit: $LASTEXITCODE"',
-        'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+        'if ($LASTEXITCODE -ne 0) {',
+        '  if (Test-Path $dismLog) {',
+        '    Write-Output "--- DISM log (dernieres 30 lignes) ---"',
+        '    Get-Content $dismLog -Tail 30 | ForEach-Object { Write-Output $_ }',
+        '  }',
+        '  exit $LASTEXITCODE',
+        '}',
         // Initialise les sources pour SYSTEM (les sources sont per-user et
         // sans ça la première commande échoue avec 0x8a15000f).
         'try {',
@@ -597,7 +610,10 @@ function doWingetInventory(data) {
             if (data.autoInstall === false) return cb('winget non installé (App Installer requis)');
             L('winget absent — auto-install');
             return installWingetSystem(L, function (instErr) {
-                if (instErr) return cb('auto-install échoué : ' + instErr);
+                if (instErr) {
+                    // On remonte le log capturé pour voir l'erreur DISM réelle.
+                    return cb('auto-install échoué : ' + instErr + ' — log : ' + log.slice(-10).join(' | '));
+                }
                 wingetExe = findWingetExe();
                 if (!wingetExe) return cb('winget toujours introuvable après install');
                 L('winget installé : ' + wingetExe);
