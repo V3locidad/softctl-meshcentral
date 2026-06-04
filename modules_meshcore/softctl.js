@@ -440,12 +440,27 @@ function findWingetExe() {
     try {
         var wapps = programFiles + '\\WindowsApps';
         var entries = fs.readdirSync(wapps);
+        // Récupère toutes les versions présentes, prend la plus récente.
+        // Le nom de dossier contient la version, ex :
+        //   Microsoft.DesktopAppInstaller_1.20.2402.13_x64__8wekyb3d8bbwe
+        var candidates = [];
         for (var i = 0; i < entries.length; i++) {
-            if (/^Microsoft\.DesktopAppInstaller_/i.test(entries[i])) {
-                var c = wapps + '\\' + entries[i] + '\\winget.exe';
-                if (fs.existsSync(c)) return c;
-            }
+            var m = entries[i].match(/^Microsoft\.DesktopAppInstaller_([\d.]+)_/i);
+            if (!m) continue;
+            var c = wapps + '\\' + entries[i] + '\\winget.exe';
+            if (fs.existsSync(c)) candidates.push({ path: c, version: m[1] });
         }
+        if (!candidates.length) return '';
+        candidates.sort(function (a, b) {
+            var pa = a.version.split('.').map(function (n) { return parseInt(n, 10) || 0; });
+            var pb = b.version.split('.').map(function (n) { return parseInt(n, 10) || 0; });
+            for (var k = 0; k < Math.max(pa.length, pb.length); k++) {
+                var da = (pb[k] || 0) - (pa[k] || 0);
+                if (da !== 0) return da;
+            }
+            return 0;
+        });
+        return candidates[0].path;
     } catch (e) {}
     return '';
 }
@@ -482,6 +497,19 @@ function installWingetSystem(L, cb) {
         '& $dismExe /Online /Quiet /Add-ProvisionedAppxPackage /PackagePath:"$wgFile" /DependencyPackagePath:"$vcFile" /SkipLicense',
         'Write-Output "DISM exit: $LASTEXITCODE"',
         'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+        // Initialise les sources pour SYSTEM (les sources sont per-user et
+        // sans ça la première commande échoue avec 0x8a15000f).
+        'try {',
+        '  $wg = Get-ChildItem (Join-Path $env:ProgramFiles "WindowsApps") -Filter "Microsoft.DesktopAppInstaller_*" -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1',
+        '  if ($wg) {',
+        '    $wgExe = Join-Path $wg.FullName "winget.exe"',
+        '    if (Test-Path $wgExe) {',
+        '      & $wgExe source reset --force 2>&1 | Out-Null',
+        '      & $wgExe source update --accept-source-agreements 2>&1 | Out-Null',
+        '      Write-Output "source reset OK"',
+        '    }',
+        '  }',
+        '} catch { Write-Output ("source reset warn: " + $_.Exception.Message) }',
         'Write-Output "OK"',
     ].join('\r\n');
     try { fs.writeFileSync(ps1File, '﻿' + script); }
@@ -646,17 +674,41 @@ function doWingetInventory(data) {
         });
         return lines.slice(-30).join('\n');
     }
-    runWinget('list --source winget --accept-source-agreements', function (err1, out1) {
-        var installed = parseWingetTable(out1 || '');
-        runWinget('upgrade --include-unknown --source winget --accept-source-agreements', function (err2, out2) {
-            var upgrades = parseWingetTable(out2 || '');
-            send({
-                installed: installed,
-                upgrades: upgrades,
-                rawList: snippet(out1 || ''),
-                rawUpgrade: snippet(out2 || ''),
+    function doScan(retried) {
+        runWinget('list --source winget --accept-source-agreements', function (err1, out1) {
+            // 0x8a15000f = source manquante → on tente un reset une fois.
+            if (!retried && /8a15000f|source reset/i.test(out1 || '')) {
+                L('source error, reset puis retry');
+                return runWinget('source reset --force', function () {
+                    runWinget('source update --accept-source-agreements', function () {
+                        doScan(true);
+                    });
+                });
+            }
+            var installed = parseWingetTable(out1 || '');
+            // --include-unknown : ajouté en winget v1.4. Fallback sans le flag
+            // si winget plus ancien (output contient "Argument name was not
+            // recognized").
+            runWinget('upgrade --include-unknown --source winget --accept-source-agreements', function (err2, out2) {
+                if (/Argument name was not recognized/i.test(out2 || '')) {
+                    L('--include-unknown non supporté (winget ancien), retry sans');
+                    runWinget('upgrade --source winget --accept-source-agreements', function (_e, out2b) {
+                        finalize(installed, out1, parseWingetTable(out2b || ''), out2b);
+                    });
+                    return;
+                }
+                finalize(installed, out1, parseWingetTable(out2 || ''), out2);
             });
         });
-    });
+    }
+    function finalize(installed, out1, upgrades, out2) {
+        send({
+            installed: installed,
+            upgrades: upgrades,
+            rawList: snippet(out1 || ''),
+            rawUpgrade: snippet(out2 || ''),
+        });
+    }
+    doScan(false);
     } // fin continueInventory
 }
