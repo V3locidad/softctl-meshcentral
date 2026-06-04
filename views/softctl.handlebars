@@ -128,6 +128,8 @@
   }
 
   var softwares = [];
+  var wingetStatus = {};
+  var wingetHasBootstrap = false;
   var agents = [];
   var meshes = [];
   var softSel = {};   // id -> true
@@ -191,6 +193,13 @@
       var sel = agentSel[a.id] ? ' selected' : '';
       var dotCls = a.online ? 'on' : 'off';
       var dotTitle = a.online ? 'En ligne' : 'Hors-ligne';
+      var ws = wingetStatus[a.id];
+      var wgBadge = '';
+      if (ws) {
+        if (ws.hasWinget && !ws.tooOld) wgBadge = '<span class="badgeOs" style="background:#d4edda;color:#155724" title="Winget ' + escapeHtml(ws.version || '') + '">✓ winget</span>';
+        else if (ws.hasWinget && ws.tooOld) wgBadge = '<span class="badgeOs" style="background:#fff3cd;color:#856404" title="Vieille version ' + escapeHtml(ws.version || '') + '">⚠ winget v' + escapeHtml(ws.version || '') + '</span>';
+        else wgBadge = '<span class="badgeOs" style="background:#f8d7da;color:#721c24" title="Winget absent">✗ winget</span>';
+      }
       return '<div class="row' + sel + '" data-id="' + escapeHtml(a.id) + '">'
            +   '<input type="checkbox" class="chk"' + checked + '>'
            +   '<span class="statusDot ' + dotCls + '" title="' + dotTitle + '"></span>'
@@ -200,6 +209,7 @@
            +       (a.mesh ? '<span class="badgeOs" style="background:#d1ecf1;color:#0c5460">' + escapeHtml(a.mesh) + '</span>' : '')
            +       '<span class="badgeOs">' + escapeHtml(a.os || '?') + '</span>'
            +       (a.arch ? '<span class="badgeArch">' + escapeHtml(a.arch) + '</span>' : '')
+           +       wgBadge
            +     '</div>'
            +   '</div>'
            +   '<button class="histBtn" data-node="' + escapeHtml(a.id) + '" data-name="' + escapeHtml(a.name) + '" title="Voir l\'historique des déploiements sur ce poste">Historique</button>'
@@ -330,7 +340,52 @@
       meshes = r.meshes || [];
       renderMeshSelect();
       renderAgents();
+      refreshWingetStatus();
     });
+  }
+
+  function refreshWingetStatus() {
+    api('wingetStatus').then(function (r) {
+      wingetStatus = r.statuses || {};
+      wingetHasBootstrap = !!r.hasBootstrap;
+      renderAgents();
+      renderWingetBanner();
+    });
+  }
+
+  function renderWingetBanner() {
+    var bar = document.getElementById('wgBanner');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'wgBanner';
+      bar.style.cssText = 'display:none;margin-bottom:8px;padding:8px 12px;background:#fff3cd;border:1px solid #ffeeba;border-radius:4px;color:#856404;align-items:center;gap:10px';
+      var deployBar = document.getElementById('deployBar');
+      deployBar.parentNode.insertBefore(bar, deployBar);
+    }
+    var missing = 0, old = 0;
+    agents.forEach(function (a) {
+      if (!a.online) return;
+      var s = wingetStatus[a.id];
+      if (!s) return;
+      if (!s.hasWinget) missing++;
+      else if (s.tooOld) old++;
+    });
+    var total = missing + old;
+    if (!total) { bar.style.display = 'none'; return; }
+    bar.style.display = 'flex';
+    var verb = wingetHasBootstrap ? '▶ Installer maintenant via NAS' : 'ℹ️ Crée un soft "winget-bootstrap" pour activer l\'install auto';
+    var btn = wingetHasBootstrap ? '<button id="wgFixBtn" class="primary" style="margin-left:auto">' + verb + '</button>' : '<span style="margin-left:auto;font-size:11px">' + verb + '</span>';
+    bar.innerHTML = '⚠ ' + total + ' poste(s) en ligne sans Winget '
+                  + '(' + missing + ' manquants, ' + old + ' trop anciens)' + btn;
+    var b = document.getElementById('wgFixBtn');
+    if (b) b.onclick = function () {
+      if (!confirm('Déployer winget-bootstrap sur ' + total + ' poste(s) ?')) return;
+      b.disabled = true; b.textContent = 'Déploiement…';
+      api('wingetFixAll').then(function (r) {
+        b.textContent = '✓ ' + (r.dispatched || 0) + ' déploiements lancés';
+        setTimeout(refreshWingetStatus, 60000);
+      });
+    };
   }
 
   $('softFilter').oninput = renderSoft;

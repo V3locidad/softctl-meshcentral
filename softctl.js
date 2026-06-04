@@ -20,6 +20,22 @@ const downloadTokens = {};
 const uploadTokens = {};
 const reportTokens = {};      // token -> { deploymentId, softId, nodeId, expires }
 const inventoryWaiters = {};  // dispatchId -> { res, expires }
+const wingetStatusCache = {}; // nodeId -> { hasWinget, version, tooOld, lastCheck }
+const wingetCheckPending = {}; // dispatchId -> nodeId
+const wingetMaintenanceState = { lastFixDispatch: {}, autoEnabled: true, baseUrl: '' };
+const WINGET_STATUS_TTL = 30 * 60 * 1000;  // 30 min de fraîcheur
+const WINGET_FIX_COOLDOWN = 60 * 60 * 1000; // 1h entre 2 tentatives sur le même poste
+
+function versionLess(a, b) {
+    if (!a) return true;
+    const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+    const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const d = (pa[i] || 0) - (pb[i] || 0);
+        if (d !== 0) return d < 0;
+    }
+    return false;
+}
 const TOKEN_TTL_MS = 30 * 60 * 1000;
 const REPORT_TTL_MS = 2 * 60 * 60 * 1000;  // 2 h, le temps qu'un gros install termine
 
@@ -207,6 +223,91 @@ module.exports.softctl = function (parent) {
     // Restaure l'historique au démarrage (on persiste à chaque update).
     loadHistory();
 
+    // ---- Maintenance Winget : scan périodique + auto-install via NAS ----
+    function kickWingetScan(forceAll) {
+        try {
+            const wsagents = (obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents) || {};
+            Object.keys(wsagents).forEach((nid) => {
+                const ws = wsagents[nid];
+                if (!ws || typeof ws.send !== 'function') return;
+                const cached = wingetStatusCache[nid];
+                if (!forceAll && cached && (Date.now() - cached.lastCheck < WINGET_STATUS_TTL)) return;
+                const dispatchId = 'wgchk-' + crypto.randomBytes(6).toString('hex');
+                wingetCheckPending[dispatchId] = nid;
+                try {
+                    ws.send(JSON.stringify({ action: 'plugin', plugin: 'softctl', pluginaction: 'wingetCheck', dispatchId: dispatchId }));
+                } catch (_) { delete wingetCheckPending[dispatchId]; }
+            });
+        } catch (e) { console.log('softctl: kickWingetScan err: ' + e.message); }
+    }
+
+    function kickWingetFix() {
+        // Déploie winget-bootstrap aux postes en ligne flaggés bad,
+        // en respectant un cooldown pour ne pas re-tirer en boucle.
+        try {
+            const cat = listCatalog();
+            const boot = (cat.softwares || []).find((s) => s.id === 'winget-bootstrap' && s.installerOk);
+            if (!boot) return 0;
+        } catch (_) { return 0; }
+        const wsagents = (obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents) || {};
+        const targets = [];
+        Object.keys(wingetStatusCache).forEach((nid) => {
+            const c = wingetStatusCache[nid];
+            if (!c || (c.hasWinget && !c.tooOld)) return;
+            if (!wsagents[nid]) return;
+            const last = wingetMaintenanceState.lastFixDispatch[nid] || 0;
+            if (Date.now() - last < WINGET_FIX_COOLDOWN) return;
+            targets.push(nid);
+        });
+        if (!targets.length) return 0;
+        // Dispatch via la pipeline deploy interne : on génère un deployment
+        // factice qui appelle la machinerie install habituelle.
+        const deploymentId = crypto.randomBytes(8).toString('hex');
+        const deployment = {
+            id: deploymentId,
+            timestamp: Date.now(),
+            user: 'auto-winget-fix',
+            softs: [{ id: 'winget-bootstrap', name: 'Winget Bootstrap' }],
+            nodes: targets.map((id) => ({ id: id })),
+            results: {},
+        };
+        deployments[deploymentId] = deployment;
+        const cfg = loadCfg();
+        targets.forEach((nid) => {
+            wingetMaintenanceState.lastFixDispatch[nid] = Date.now();
+            const ws = wsagents[nid];
+            if (!ws) return;
+            const dispatchId = crypto.randomBytes(16).toString('hex');
+            reportTokens[dispatchId] = { deploymentId: deploymentId, softId: 'winget-bootstrap', nodeId: nid, expires: Date.now() + REPORT_TTL_MS };
+            try {
+                const token = newDownloadToken('winget-bootstrap');
+                const base = wingetMaintenanceState.baseUrl || '';
+                const url = base + '/softctl-download/' + token;
+                ws.send(JSON.stringify({
+                    action: 'plugin', plugin: 'softctl', pluginaction: 'install',
+                    dispatchId: dispatchId,
+                    url: url,
+                    installer: 'winget-bootstrap.zip',
+                    archiveInstaller: 'install-winget.cmd',
+                    silentArgs: '',
+                }));
+                deployment.results['winget-bootstrap|' + nid] = { status: 'dispatched', time: Date.now() };
+            } catch (_) {}
+        });
+        saveHistory();
+        return targets.length;
+    }
+
+    // Boucle 5 min : scan + auto-fix si activé
+    setInterval(() => {
+        kickWingetScan(false);
+        if (wingetMaintenanceState.autoEnabled) {
+            setTimeout(kickWingetFix, 15000);  // laisser arriver les résultats
+        }
+    }, 5 * 60 * 1000);
+    // Premier scan 30s après démarrage
+    setTimeout(() => { kickWingetScan(true); }, 30000);
+
     // Enregistre un endpoint dédié pour les uploads, en dehors de pluginadmin.ashx
     // dont MC refuse les POST/PUT (CSRF-like). On utilise un token d'usage unique
     // pour gérer l'auth nous-mêmes — le token n'est délivré qu'à un user
@@ -218,6 +319,20 @@ module.exports.softctl = function (parent) {
         try {
             if (!command) return;
             if (command.pluginaction === 'pong') return;
+            if (command.pluginaction === 'wingetCheckResult') {
+                const nid = wingetCheckPending[command.dispatchId];
+                if (nid) delete wingetCheckPending[command.dispatchId];
+                const targetNid = nid || command.nodeId;
+                if (!targetNid) return;
+                const tooOld = command.hasWinget && versionLess(command.version, '1.4');
+                wingetStatusCache[targetNid] = {
+                    hasWinget: !!command.hasWinget,
+                    version: command.version || '',
+                    tooOld: !!tooOld,
+                    lastCheck: Date.now(),
+                };
+                return;
+            }
             if (command.pluginaction === 'wingetInventoryResult') {
                 const w = inventoryWaiters[command.dispatchId];
                 if (!w) return;
@@ -794,6 +909,43 @@ module.exports.softctl = function (parent) {
             } catch (e) {
                 return sendJson(res, 200, { ok: false, error: e.message });
             }
+        }
+
+        // Cache l'URL de base à chaque requête utilisateur — utilisée par la
+        // boucle background pour générer les URL de download des agents.
+        try { wingetMaintenanceState.baseUrl = req.protocol + '://' + req.get('host'); } catch (_) {}
+
+        if (action === 'wingetStatus') {
+            // Renvoie le cache + flag de configuration.
+            const out = {};
+            Object.keys(wingetStatusCache).forEach((nid) => {
+                const c = wingetStatusCache[nid];
+                if (Date.now() - c.lastCheck < WINGET_STATUS_TTL) out[nid] = c;
+            });
+            // Check si le soft winget-bootstrap existe au catalogue
+            let hasBootstrap = false;
+            try {
+                const cat = listCatalog();
+                hasBootstrap = (cat.softwares || []).some((s) => s.id === 'winget-bootstrap' && s.installerOk);
+            } catch (_) {}
+            return sendJson(res, 200, { statuses: out, hasBootstrap: hasBootstrap, autoEnabled: wingetMaintenanceState.autoEnabled });
+        }
+
+        if (action === 'wingetSetAuto') {
+            wingetMaintenanceState.autoEnabled = req.query.enabled === '1';
+            return sendJson(res, 200, { ok: true, autoEnabled: wingetMaintenanceState.autoEnabled });
+        }
+
+        if (action === 'wingetCheckNow') {
+            // Force un scan immédiat sur tous les postes en ligne.
+            kickWingetScan(true);
+            return sendJson(res, 200, { ok: true });
+        }
+
+        if (action === 'wingetFixAll') {
+            // Déploie winget-bootstrap sur tous les postes manquants/vieux.
+            const fixed = kickWingetFix();
+            return sendJson(res, 200, { ok: true, dispatched: fixed });
         }
 
         if (action === 'wingetInventory') {

@@ -49,6 +49,9 @@ function consoleaction(args, rights, sessionid, parent) {
             case 'wingetInventory':
                 doWingetInventory(args);
                 return 'inventory started';
+            case 'wingetCheck':
+                doWingetCheck(args);
+                return 'check started';
             default:
                 return 'softctl: action inconnue ' + fnname;
         }
@@ -573,5 +576,45 @@ function doWingetInventory(data) {
                 rawUpgrade: snippet(out2 || ''),
             });
         });
+    });
+}
+
+function doWingetCheck(data) {
+    // Check ultra-rapide : scan WindowsApps pour Microsoft.DesktopAppInstaller
+    // et remonte la version trouvée. Pas de PowerShell, pas de réseau.
+    var fs = require('fs');
+    var dispatchId = data.dispatchId;
+    var programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
+    var found = '', version = '';
+    try {
+        var wapps = programFiles + '\\WindowsApps';
+        var entries = fs.readdirSync(wapps);
+        var matches = [];
+        for (var i = 0; i < entries.length; i++) {
+            var m = entries[i].match(/^Microsoft\.DesktopAppInstaller_([\d.]+)_/i);
+            if (!m) continue;
+            var p = wapps + '\\' + entries[i] + '\\winget.exe';
+            if (fs.existsSync(p)) matches.push({ p: p, v: m[1] });
+        }
+        if (matches.length) {
+            matches.sort(function (a, b) {
+                var pa = a.v.split('.').map(function (n) { return parseInt(n, 10) || 0; });
+                var pb = b.v.split('.').map(function (n) { return parseInt(n, 10) || 0; });
+                for (var k = 0; k < Math.max(pa.length, pb.length); k++) {
+                    var d = (pb[k] || 0) - (pa[k] || 0);
+                    if (d !== 0) return d;
+                }
+                return 0;
+            });
+            found = matches[0].p;
+            version = matches[0].v;
+        }
+    } catch (e) {}
+    reply({
+        pluginaction: 'wingetCheckResult',
+        dispatchId: dispatchId,
+        hasWinget: !!found,
+        version: version,
+        exePath: found,
     });
 }
