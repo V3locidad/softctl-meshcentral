@@ -19,16 +19,7 @@ const crypto = require('crypto');
 const downloadTokens = {};
 const uploadTokens = {};
 const reportTokens = {};      // token -> { deploymentId, softId, nodeId, expires }
-const inventoryWaiters = {};  // dispatchId -> { res, expires, nodeId }
-const inventoryProgress = {}; // dispatchId -> { tail, lastUpdate }
-const wingetBundleTokens = {}; // token -> { file, expires }
-const WINGET_BUNDLE = {
-    vclibs: { name: 'Microsoft.VCLibs.x64.14.00.Desktop.appx', url: 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' },
-    uixaml: { name: 'Microsoft.UI.Xaml.2.8.x64.appx', url: 'https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx' },
-    winget: { name: 'winget.msixbundle', url: 'https://aka.ms/getwinget' },
-};
-const wingetCacheDir = require('path').join(__dirname, 'winget-cache');
-const bundledDir = require('path').join(__dirname, 'bundled');
+const inventoryWaiters = {};  // dispatchId -> { res, expires }
 const TOKEN_TTL_MS = 30 * 60 * 1000;
 const REPORT_TTL_MS = 2 * 60 * 60 * 1000;  // 2 h, le temps qu'un gros install termine
 
@@ -227,66 +218,10 @@ module.exports.softctl = function (parent) {
         try {
             if (!command) return;
             if (command.pluginaction === 'pong') return;
-            // Requête de bundle depuis l'agent (via WebSocket déjà établi avec MC).
-            // Marche même quand l'agent n'a aucun accès internet/HTTP.
-            if (command.pluginaction === 'wgBundleRequest') {
-                try {
-                    const wsa = obj.meshServer.webserver.wsagents[command.nodeId || ''];
-                    const target = wsa || (function () {
-                        // Si nodeId pas passé, on cherche l'agent qui a envoyé ça
-                        const all = obj.meshServer.webserver.wsagents || {};
-                        return Object.values(all).find((a) => a && a.dbNodeKey) || null;
-                    })();
-                    if (!target) return;
-                    const key = String(command.file || '');
-                    const meta = WINGET_BUNDLE[key];
-                    if (!meta) return;
-                    ensureWingetBundle(key, (err, filePath) => {
-                        if (err) {
-                            try { target.send(JSON.stringify({ action: 'plugin', plugin: 'softctl', pluginaction: 'wgBundleData', dispatchId: command.dispatchId, file: key, error: err.message })); } catch (_) {}
-                            return;
-                        }
-                        const CHUNK = 256 * 1024;
-                        const stat = fs.statSync(filePath);
-                        let offset = 0;
-                        const fd = fs.openSync(filePath, 'r');
-                        try { target.send(JSON.stringify({ action: 'plugin', plugin: 'softctl', pluginaction: 'wgBundleData', dispatchId: command.dispatchId, file: key, size: stat.size, start: true })); } catch (_) {}
-                        function nextChunk() {
-                            if (offset >= stat.size) {
-                                try { fs.closeSync(fd); } catch (_) {}
-                                try { target.send(JSON.stringify({ action: 'plugin', plugin: 'softctl', pluginaction: 'wgBundleData', dispatchId: command.dispatchId, file: key, end: true })); } catch (_) {}
-                                return;
-                            }
-                            const buf = Buffer.alloc(Math.min(CHUNK, stat.size - offset));
-                            fs.readSync(fd, buf, 0, buf.length, offset);
-                            offset += buf.length;
-                            try {
-                                target.send(JSON.stringify({
-                                    action: 'plugin', plugin: 'softctl', pluginaction: 'wgBundleData',
-                                    dispatchId: command.dispatchId, file: key,
-                                    offset: offset - buf.length, total: stat.size,
-                                    b64: buf.toString('base64'),
-                                }));
-                            } catch (_) {}
-                            setImmediate(nextChunk);
-                        }
-                        nextChunk();
-                    });
-                } catch (e) { console.log('softctl: wgBundleRequest err: ' + e.message); }
-                return;
-            }
-            if (command.pluginaction === 'wingetInventoryProgress') {
-                inventoryProgress[command.dispatchId] = {
-                    tail: command.tail || (command.line ? [command.line] : []),
-                    lastUpdate: Date.now(),
-                };
-                return;
-            }
             if (command.pluginaction === 'wingetInventoryResult') {
                 const w = inventoryWaiters[command.dispatchId];
                 if (!w) return;
                 delete inventoryWaiters[command.dispatchId];
-                delete inventoryProgress[command.dispatchId];
                 try {
                     w.res.setHeader('Content-Type', 'application/json');
                     w.res.end(JSON.stringify({
@@ -322,115 +257,6 @@ module.exports.softctl = function (parent) {
             console.log('softctl: serveraction error: ' + e.message);
         }
     };
-
-    // Cache des bundles winget côté serveur MC : un poste hors-internet
-    // (proxy d'établissement) ne peut pas atteindre aka.ms, mais peut
-    // joindre son MC. On télécharge une fois côté serveur, puis on sert
-    // localement.
-    function ensureWingetBundle(key, cb) {
-        const entry = WINGET_BUNDLE[key];
-        if (!entry) return cb(new Error('clé bundle inconnue: ' + key));
-        try { if (!fs.existsSync(wingetCacheDir)) fs.mkdirSync(wingetCacheDir); } catch (_) {}
-        const dest = path.join(wingetCacheDir, entry.name);
-        if (fs.existsSync(dest)) {
-            const stat = fs.statSync(dest);
-            if (stat.size > 1024 * 100) return cb(null, dest);
-            try { fs.unlinkSync(dest); } catch (_) {}
-        }
-        // Fallback bundled : si le repo softctl/bundled/<file> existe, on
-        // l'utilise directement sans tenter de download. Pratique pour les
-        // serveurs MC sans internet.
-        const bundledFile = path.join(bundledDir, entry.name);
-        if (fs.existsSync(bundledFile) && fs.statSync(bundledFile).size > 1024 * 100) {
-            try {
-                fs.copyFileSync(bundledFile, dest);
-                console.log('softctl: bundle ' + key + ' copié depuis bundled/');
-                return cb(null, dest);
-            } catch (e) {
-                console.log('softctl: copie bundled ' + key + ' échoue : ' + e.message);
-            }
-        }
-        const https = require('https');
-        const http = require('http');
-        const tmp = dest + '.dl';
-        function pickLib(u) { return u.indexOf('http://') === 0 ? http : https; }
-        function getUrl(u, redirCount) {
-            if (redirCount > 10) return cb(new Error('trop de redirections sur ' + key));
-            const lib = pickLib(u);
-            const req = lib.get(u, { headers: { 'User-Agent': 'Mozilla/5.0 softctl', 'Accept': '*/*' } }, (r) => {
-                if ([301, 302, 303, 307, 308].indexOf(r.statusCode) !== -1 && r.headers.location) {
-                    r.resume();
-                    // Location peut être relatif
-                    let next = r.headers.location;
-                    if (next.indexOf('http') !== 0) {
-                        const url = require('url');
-                        next = url.resolve(u, next);
-                    }
-                    console.log('softctl: redirect ' + key + ' (' + r.statusCode + ') → ' + next.slice(0, 100));
-                    return getUrl(next, redirCount + 1);
-                }
-                if (r.statusCode !== 200) {
-                    r.resume();
-                    return cb(new Error('HTTP ' + r.statusCode + ' sur ' + u.slice(0, 100)));
-                }
-                const file = fs.createWriteStream(tmp);
-                r.pipe(file);
-                file.on('finish', () => {
-                    file.close(() => {
-                        try {
-                            const sz = fs.statSync(tmp).size;
-                            if (sz < 1024 * 100) {
-                                fs.unlinkSync(tmp);
-                                return cb(new Error('fichier trop petit (' + sz + 'o) — probablement page d\'erreur'));
-                            }
-                            fs.renameSync(tmp, dest);
-                            console.log('softctl: bundle ' + key + ' OK (' + Math.round(sz / 1024) + ' Ko)');
-                        } catch (e) { return cb(e); }
-                        cb(null, dest);
-                    });
-                });
-                file.on('error', (e) => { try { fs.unlinkSync(tmp); } catch (_) {} cb(e); });
-            });
-            req.setTimeout(60000, () => { try { req.destroy(new Error('timeout 60s sur ' + u.slice(0, 80))); } catch (_) {} });
-            req.on('error', (e) => {
-                try { fs.unlinkSync(tmp); } catch (_) {}
-                const msg = (e && (e.message || e.code)) || 'erreur réseau inconnue';
-                console.log('softctl: erreur DL ' + key + ' : ' + msg);
-                cb(new Error(msg));
-            });
-        }
-        console.log('softctl: téléchargement bundle ' + key + ' depuis ' + entry.url);
-        getUrl(entry.url, 0);
-    }
-    function ensureAllBundles(cb) {
-        const keys = Object.keys(WINGET_BUNDLE);
-        let i = 0, errs = [];
-        function next() {
-            if (i >= keys.length) return cb(errs.length ? errs.join('; ') : null);
-            const k = keys[i++];
-            ensureWingetBundle(k, (e) => {
-                if (e) errs.push(k + ': ' + (e.message || e.toString() || 'erreur sans message'));
-                next();
-            });
-        }
-        next();
-    }
-    function buildBundleUrls(baseUrl) {
-        // Renvoie un dict { vclibs, uixaml, winget } vers les fichiers cachés.
-        // Si la cache est vide pour un fichier, on omet l'URL — l'agent
-        // tentera son fallback Microsoft.
-        const out = {};
-        Object.keys(WINGET_BUNDLE).forEach((k) => {
-            const dest = path.join(wingetCacheDir, WINGET_BUNDLE[k].name);
-            if (!fs.existsSync(dest)) return;
-            const tok = crypto.randomBytes(20).toString('hex');
-            wingetBundleTokens[tok] = { file: k, expires: Date.now() + 30 * 60 * 1000 };
-            out[k] = baseUrl + '/softctl-wgbundle/' + tok;
-        });
-        return out;
-    }
-    obj.ensureAllBundles = ensureAllBundles;
-    obj.buildBundleUrls = buildBundleUrls;
 
     obj.server_startup = function () {
         const ws = obj.meshServer && obj.meshServer.webserver;
@@ -541,29 +367,6 @@ module.exports.softctl = function (parent) {
             }
         });
         console.log('softctl: PUT /softctl-upload/:token enregistré');
-
-        // Serveur de fichiers winget cachés (bundle MSIX). L'agent télécharge
-        // depuis MC plutôt que aka.ms : pas de proxy/internet requis sur les
-        // postes. Token au porteur, single-use.
-        app.get('/softctl-wgbundle/:token', (req, res) => {
-            try {
-                const token = String(req.params.token || '');
-                const ent = wingetBundleTokens[token];
-                if (!ent || ent.expires < Date.now()) return res.status(403).set('Content-Type', 'text/plain').send('forbidden');
-                const meta = WINGET_BUNDLE[ent.file];
-                if (!meta) return res.status(404).send('unknown file');
-                const filePath = path.join(wingetCacheDir, meta.name);
-                if (!fs.existsSync(filePath)) return res.status(404).send('not cached');
-                const stat = fs.statSync(filePath);
-                res.set('Content-Type', 'application/octet-stream');
-                res.set('Content-Length', stat.size);
-                res.set('Content-Disposition', 'attachment; filename="' + meta.name + '"');
-                fs.createReadStream(filePath).pipe(res);
-                // Token single-use : on le supprime après ouverture du stream
-                delete wingetBundleTokens[token];
-            } catch (e) { res.status(500).send(e.message); }
-        });
-        console.log('softctl: GET /softctl-wgbundle/:token enregistré');
     };
 
     obj.handleAdminReq = function (req, res, user) {
@@ -993,44 +796,10 @@ module.exports.softctl = function (parent) {
             }
         }
 
-        if (action === 'wingetInventoryProgress') {
-            const nodeIdQ = String(req.query.nodeId || '');
-            // Cherche un dispatchId en cours pour ce node
-            let found = null;
-            Object.keys(inventoryWaiters).forEach((d) => {
-                if (inventoryWaiters[d].nodeId === nodeIdQ) found = d;
-            });
-            if (!found) return sendJson(res, 200, { inProgress: false });
-            const prog = inventoryProgress[found] || { tail: [], lastUpdate: 0 };
-            return sendJson(res, 200, {
-                inProgress: true,
-                tail: prog.tail,
-                ageSec: Math.round((Date.now() - prog.lastUpdate) / 1000),
-            });
-        }
-
-        if (action === 'wingetBundleStatus') {
-            // Diag : liste l'état du cache + force-prefetch si ?refresh=1
-            const refresh = req.query.refresh === '1';
-            if (refresh) {
-                Object.keys(WINGET_BUNDLE).forEach((k) => {
-                    const d = path.join(wingetCacheDir, WINGET_BUNDLE[k].name);
-                    try { if (fs.existsSync(d)) fs.unlinkSync(d); } catch (_) {}
-                });
-            }
-            ensureAllBundles((e) => {
-                const out = { error: e || null, files: {} };
-                Object.keys(WINGET_BUNDLE).forEach((k) => {
-                    const d = path.join(wingetCacheDir, WINGET_BUNDLE[k].name);
-                    if (fs.existsSync(d)) out.files[k] = { name: WINGET_BUNDLE[k].name, sizeKo: Math.round(fs.statSync(d).size / 1024) };
-                    else out.files[k] = { name: WINGET_BUNDLE[k].name, missing: true, url: WINGET_BUNDLE[k].url };
-                });
-                sendJson(res, 200, out);
-            });
-            return;
-        }
-
         if (action === 'wingetInventory') {
+            // Inventaire winget d'un poste : installed + upgrades dispo.
+            // Réponse asynchrone : on stocke `res` dans inventoryWaiters et
+            // on répond depuis serveraction quand l'agent renvoie.
             const nodeId = String(req.query.nodeId || '');
             const ws2 = obj.meshServer && obj.meshServer.webserver;
             const wsagents2 = ws2 && ws2.wsagents;
@@ -1038,31 +807,22 @@ module.exports.softctl = function (parent) {
             if (!target || typeof target.send !== 'function') {
                 return sendJson(res, 200, { ok: false, error: 'agent introuvable/déconnecté' });
             }
-            // Timeout étendu : si on doit télécharger le bundle, ça prend du temps.
             const dispatchId = 'inv-' + crypto.randomBytes(8).toString('hex');
-            inventoryWaiters[dispatchId] = { res: res, expires: Date.now() + 15 * 60 * 1000, nodeId: nodeId };
-            inventoryProgress[dispatchId] = { tail: ['démarrage…'], lastUpdate: Date.now() };
+            inventoryWaiters[dispatchId] = { res: res, expires: Date.now() + 180000 };
+            // GC : si l'agent ne répond pas dans 3 min, on libère et on
+            // renvoie un timeout pour ne pas garder le HTTP pendu.
             setTimeout(function () {
                 const w = inventoryWaiters[dispatchId];
                 if (!w) return;
                 delete inventoryWaiters[dispatchId];
-                try { sendJson(w.res, 200, { ok: false, error: 'timeout agent (15 min)' }); } catch (_) {}
-            }, 15 * 60 * 1000);
-            const baseUrl = req.protocol + '://' + req.get('host');
-            ensureAllBundles((bundleErr) => {
-                if (bundleErr) console.log('softctl: bundle cache partiel : ' + bundleErr);
-                const bundleUrls = buildBundleUrls(baseUrl);
-                try {
-                    target.send(JSON.stringify({
-                        action: 'plugin', plugin: 'softctl', pluginaction: 'wingetInventory',
-                        dispatchId: dispatchId,
-                        bundleUrls: bundleUrls,
-                    }));
-                } catch (e) {
-                    delete inventoryWaiters[dispatchId];
-                    try { sendJson(res, 200, { ok: false, error: e.message }); } catch (_) {}
-                }
-            });
+                try { sendJson(w.res, 200, { ok: false, error: 'timeout agent (3 min)' }); } catch (_) {}
+            }, 180000);
+            try {
+                target.send(JSON.stringify({ action: 'plugin', plugin: 'softctl', pluginaction: 'wingetInventory', dispatchId: dispatchId }));
+            } catch (e) {
+                delete inventoryWaiters[dispatchId];
+                return sendJson(res, 200, { ok: false, error: e.message });
+            }
             return;
         }
 
@@ -1141,16 +901,6 @@ module.exports.softctl = function (parent) {
             const wsagents = obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents;
             if (!wsagents) return sendJson(res, 500, { error: 'MC wsagents inaccessible' });
 
-            // Pré-télécharge / vérifie les bundles winget, puis fait pointer
-            // l'agent vers les fichiers en cache MC plutôt que vers aka.ms.
-            const deployBaseUrl = req.protocol + '://' + req.get('host');
-            const wgBundleReady = new Promise(function (resolve) {
-                ensureAllBundles(function (e) {
-                    if (e) console.log('softctl: bundle cache partiel : ' + e);
-                    resolve(buildBundleUrls(deployBaseUrl));
-                });
-            });
-
             const deploymentId = crypto.randomBytes(8).toString('hex');
             const userName = (user && (user.name || user._id)) || 'unknown';
             const nodeNames = {};
@@ -1210,25 +960,22 @@ module.exports.softctl = function (parent) {
                         deployment.results[key] = { status: 'dispatch-failed', error: 'wsagent ciblage incohérent', time: Date.now() };
                         return;
                     }
-                    wgBundleReady.then(function (bundleUrls) {
-                        const message = {
-                            action: 'plugin', plugin: 'softctl',
-                            pluginaction: 'wingetInstall',
-                            dispatchId: dispatchId,
-                            packageId: pid,
-                            mode: mode,
-                            force: force,
-                            bundleUrls: bundleUrls,
-                        };
-                        try {
-                            ws.send(JSON.stringify(message));
-                            results.push({ packageId: pid, nodeId: nodeId, ok: true });
-                            deployment.results[key] = { status: 'dispatched', time: Date.now() };
-                        } catch (e) {
-                            results.push({ packageId: pid, nodeId: nodeId, ok: false, error: e.message });
-                            deployment.results[key] = { status: 'dispatch-failed', error: e.message, time: Date.now() };
-                        }
-                    });
+                    const message = {
+                        action: 'plugin', plugin: 'softctl',
+                        pluginaction: 'wingetInstall',
+                        dispatchId: dispatchId,
+                        packageId: pid,
+                        mode: mode,
+                        force: force,
+                    };
+                    try {
+                        ws.send(JSON.stringify(message));
+                        results.push({ packageId: pid, nodeId: nodeId, ok: true });
+                        deployment.results[key] = { status: 'dispatched', time: Date.now() };
+                    } catch (e) {
+                        results.push({ packageId: pid, nodeId: nodeId, ok: false, error: e.message });
+                        deployment.results[key] = { status: 'dispatch-failed', error: e.message, time: Date.now() };
+                    }
                 });
             });
 

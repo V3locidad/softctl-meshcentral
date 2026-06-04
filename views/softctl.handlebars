@@ -743,25 +743,8 @@
 
     function fetchAndRender() {
       var box = bg.querySelector('#invBody');
-      box.innerHTML = '<div class="empty"><div id="invProgressTxt">Interrogation de l\'agent…</div><div id="invProgressLog" style="margin-top:10px;text-align:left;font-family:monospace;font-size:11px;background:#1e1e1e;color:#eee;padding:8px;border-radius:4px;max-height:160px;overflow:auto;display:none"></div></div>';
-      var progressTimer = setInterval(function () {
-        api('wingetInventoryProgress', { nodeId: nodeId }).then(function (pr) {
-          if (!pr.inProgress) { clearInterval(progressTimer); return; }
-          var tail = pr.tail || [];
-          if (tail.length) {
-            var logEl = document.getElementById('invProgressLog');
-            if (logEl) {
-              logEl.style.display = 'block';
-              logEl.innerHTML = tail.map(escapeHtml).join('<br>');
-              logEl.scrollTop = logEl.scrollHeight;
-            }
-            var txt = document.getElementById('invProgressTxt');
-            if (txt) txt.textContent = '⏳ ' + tail[tail.length - 1];
-          }
-        });
-      }, 3000);
+      box.innerHTML = '<div class="empty">Interrogation de l\'agent (jusqu\'à 3 min)…</div>';
       api('wingetInventory', { nodeId: nodeId }).then(function (r) {
-        clearInterval(progressTimer);
         if (!r.ok) {
           box.innerHTML = '<div class="empty" style="color:#721c24">Erreur : ' + escapeHtml(r.error || 'inconnue') + '</div>';
           return;

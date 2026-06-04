@@ -49,9 +49,6 @@ function consoleaction(args, rights, sessionid, parent) {
             case 'wingetInventory':
                 doWingetInventory(args);
                 return 'inventory started';
-            case 'wgBundleData':
-                handleBundleData(args);
-                return 'chunk handled';
             default:
                 return 'softctl: action inconnue ' + fnname;
         }
@@ -159,24 +156,21 @@ function doWingetInstall(data) {
     if (mode !== 'upgrade-all' && !packageId) return done(-1, 'packageId manquant');
 
     var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
-    var wingetExe = findWingetExe();
+    var programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
+    var wingetExe = '';
+    try {
+        var wapps = programFiles + '\\WindowsApps';
+        var entries = fs.readdirSync(wapps);
+        for (var i = 0; i < entries.length; i++) {
+            if (/^Microsoft\.DesktopAppInstaller_/i.test(entries[i])) {
+                var candidate = wapps + '\\' + entries[i] + '\\winget.exe';
+                if (fs.existsSync(candidate)) { wingetExe = candidate; break; }
+            }
+        }
+    } catch (e) { L('scan WindowsApps: ' + e); }
 
-    function continueInstall() {
-        L('winget exe: ' + wingetExe);
-        runWingetCommand();
-    }
-    if (!wingetExe) {
-        L('winget absent — auto-install en cours');
-        installWingetSystem(L, function (instErr) {
-            if (instErr) return done(-1, 'auto-install winget échoué : ' + instErr);
-            wingetExe = findWingetExe();
-            if (!wingetExe) return done(-1, 'winget toujours introuvable après install');
-            continueInstall();
-        }, data.bundleUrls);
-        return;
-    }
-    continueInstall();
-    function runWingetCommand() {
+    if (!wingetExe) { L('winget.exe introuvable'); return done(-1, 'winget non installé (App Installer requis)'); }
+    L('winget exe: ' + wingetExe);
 
     // On enveloppe dans cmd.exe /c pour les mêmes raisons que runInstaller
     // (MeshAgent en service bloque les stdio des process lancés direct).
@@ -194,7 +188,7 @@ function doWingetInstall(data) {
         // « Please specify --source ». On ne vise que la source winget.
         cmdLine += ' --source winget';
     }
-    cmdLine += ' --silent --accept-source-agreements --accept-package-agreements --disable-interactivity';
+    cmdLine += ' --silent --accept-source-agreements --accept-package-agreements';
     // --verbose force winget à écrire des lignes diagnostiques sur stdout
     // même en mode silent — sinon on capture un log vide quand il bail tôt.
     cmdLine += ' --verbose';
@@ -325,7 +319,6 @@ function doWingetInstall(data) {
         L('spawn error: ' + e);
         done(-1, e);
     }
-    } // fin runWingetCommand
 }
 
 function runInstaller(target, silentArgs, L, done) {
@@ -437,412 +430,32 @@ function rmRf(p) {
     }
 }
 
-// Étatd des téléchargements bundle via plugin channel.
-var _bundleDl = {};  // dispatchId -> { file, path, cb, received, expected }
-
-function handleBundleData(args) {
-    var dispatchId = args.dispatchId;
-    var st = _bundleDl[dispatchId];
-    if (!st) return;
-    var fs = require('fs');
-    if (args.error) {
-        try { fs.unlinkSync(st.path); } catch (_) {}
-        delete _bundleDl[dispatchId];
-        st.cb && st.cb(args.error);
-        return;
-    }
-    if (args.start) {
-        st.expected = args.size || 0;
-        st.received = 0;
-        try { fs.writeFileSync(st.path, ''); } catch (_) {}
-        return;
-    }
-    if (args.end) {
-        var done = _bundleDl[dispatchId];
-        delete _bundleDl[dispatchId];
-        if (done && done.cb) done.cb(null, done.path);
-        return;
-    }
-    if (args.b64) {
-        try {
-            var buf = (typeof Buffer !== 'undefined' && Buffer.from) ? Buffer.from(args.b64, 'base64') : decodeBase64(args.b64);
-            fs.appendFileSync(st.path, buf);
-            st.received += buf.length;
-        } catch (e) {}
-    }
-}
-
-function decodeBase64(s) {
-    // Fallback Duktape sans Buffer.
-    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-    s = String(s).replace(/[^A-Za-z0-9+/=]/g, '');
-    var out = [];
-    for (var i = 0; i < s.length; i += 4) {
-        var n1 = chars.indexOf(s[i]),  n2 = chars.indexOf(s[i+1]),
-            n3 = chars.indexOf(s[i+2]), n4 = chars.indexOf(s[i+3]);
-        out.push((n1 << 2) | (n2 >> 4));
-        if (s[i+2] !== '=') out.push(((n2 & 15) << 4) | (n3 >> 2));
-        if (s[i+3] !== '=') out.push(((n3 & 3) << 6) | n4);
-    }
-    return Buffer.from ? Buffer.from(out) : out;
-}
-
-function requestBundle(key, destPath, cb) {
-    var dispatchId = 'wgdl_' + Date.now() + '_' + Math.floor(Math.random() * 1e9);
-    _bundleDl[dispatchId] = { file: key, path: destPath, cb: cb, received: 0, expected: 0 };
-    reply({ pluginaction: 'wgBundleRequest', dispatchId: dispatchId, file: key });
-    // Timeout 5 min
-    setTimeout(function () {
-        if (_bundleDl[dispatchId]) {
-            delete _bundleDl[dispatchId];
-            cb('timeout 5 min sur bundle ' + key);
-        }
-    }, 5 * 60 * 1000);
-}
-
-function findWingetExe() {
-    var fs = require('fs');
-    var programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
-    try {
-        var wapps = programFiles + '\\WindowsApps';
-        var entries = fs.readdirSync(wapps);
-        // Récupère toutes les versions présentes, prend la plus récente.
-        // Le nom de dossier contient la version, ex :
-        //   Microsoft.DesktopAppInstaller_1.20.2402.13_x64__8wekyb3d8bbwe
-        var candidates = [];
-        for (var i = 0; i < entries.length; i++) {
-            var m = entries[i].match(/^Microsoft\.DesktopAppInstaller_([\d.]+)_/i);
-            if (!m) continue;
-            var c = wapps + '\\' + entries[i] + '\\winget.exe';
-            if (fs.existsSync(c)) candidates.push({ path: c, version: m[1] });
-        }
-        if (!candidates.length) return '';
-        candidates.sort(function (a, b) {
-            var pa = a.version.split('.').map(function (n) { return parseInt(n, 10) || 0; });
-            var pb = b.version.split('.').map(function (n) { return parseInt(n, 10) || 0; });
-            for (var k = 0; k < Math.max(pa.length, pb.length); k++) {
-                var da = (pb[k] || 0) - (pa[k] || 0);
-                if (da !== 0) return da;
-            }
-            return 0;
-        });
-        return candidates[0].path;
-    } catch (e) {}
-    return '';
-}
-
-function checkWingetVersion(wingetExe, cb) {
-    var cp = require('child_process');
-    var fs = require('fs');
-    var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
-    var tmpRoot = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
-    var stamp = Date.now() + '_' + Math.floor(Math.random() * 1e9);
-    var outFile = tmpRoot + '\\softctl_wver_' + stamp + '.txt';
-    var batFile = tmpRoot + '\\softctl_wver_' + stamp + '.bat';
-    try { fs.writeFileSync(batFile, '@echo off\r\n"' + wingetExe + '" --version > "' + outFile + '" 2>&1\r\n'); }
-    catch (e) { return cb(''); }
-    try {
-        var child = cp.execFile(windir + '\\System32\\cmd.exe', ['/c', batFile]);
-        var done2 = false;
-        function finish() {
-            if (done2) return; done2 = true;
-            var out = '';
-            try { if (fs.existsSync(outFile)) out = fs.readFileSync(outFile, 'utf8').toString(); } catch (_) {}
-            try { fs.unlinkSync(outFile); } catch (_) {}
-            try { fs.unlinkSync(batFile); } catch (_) {}
-            var m = String(out).match(/v?(\d+\.\d+(?:\.\d+)?)/);
-            cb(m ? m[1] : '');
-        }
-        child.on('exit', finish);
-        setTimeout(finish, 8000);
-    } catch (e) { cb(''); }
-}
-
-function versionLess(a, b) {
-    if (!a) return true;
-    var pa = String(a).split('.').map(function (n) { return parseInt(n, 10) || 0; });
-    var pb = String(b).split('.').map(function (n) { return parseInt(n, 10) || 0; });
-    for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
-        var da = (pa[i] || 0) - (pb[i] || 0);
-        if (da !== 0) return da < 0;
-    }
-    return false;
-}
-
-function installWingetSystem(L, cb, bundleUrls) {
-    bundleUrls = bundleUrls || {};
-    // Télécharge VCLibs + winget MSIXBundle puis provisionne pour tous les
-    // utilisateurs via DISM. Fonctionne en SYSTEM.
-    var fs = require('fs');
-    var cp = require('child_process');
-    var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
-    var tmpRoot = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
-    var stamp = Date.now() + '_' + Math.floor(Math.random() * 1e9);
-    var workDir = tmpRoot + '\\softctl_winget_install_' + stamp;
-    var ps1File = workDir + '\\install.ps1';
-    var logFile = workDir + '\\install.log';
-    var batFile = workDir + '\\install.bat';
-    try { fs.mkdirSync(workDir); } catch (_) {}
-    var progressLog = workDir + '\\progress.log';
-    var script = [
-        '$ErrorActionPreference = "Stop"',
-        '$ProgressPreference = "SilentlyContinue"',
-        '$progressLog = "' + progressLog.replace(/\\/g, '\\\\') + '"',
-        // Buffer-bypass : on appende directement dans le log à chaque étape
-        // (Write-Output redirigé via cmd > est bufferisé et reste vide).
-        'function Log($m) {',
-        '  $ts = Get-Date -Format "HH:mm:ss"',
-        '  Add-Content -Path $progressLog -Value ($ts + " " + $m) -Encoding UTF8',
-        '}',
-        'Log "ps1 demarre"',
-        '$work = "' + workDir.replace(/\\/g, '\\\\') + '"',
-        'New-Item -ItemType Directory -Force -Path $work | Out-Null',
-        '$vcUrl = ' + (bundleUrls.vclibs ? ('"' + bundleUrls.vclibs + '"') : '"https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx"'),
-        '$xamlUrl = ' + (bundleUrls.uixaml ? ('"' + bundleUrls.uixaml + '"') : '"https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx"'),
-        '$wgUrl = ' + (bundleUrls.winget ? ('"' + bundleUrls.winget + '"') : '"https://aka.ms/getwinget"'),
-        '$vcFile = Join-Path $work "vclibs.appx"',
-        '$xamlFile = Join-Path $work "uixaml.appx"',
-        '$wgFile = Join-Path $work "winget.msixbundle"',
-        '$dismLog = Join-Path $work "dism.log"',
-        '$curl = Join-Path $env:WINDIR "System32\\curl.exe"',
-        'if (-not (Test-Path $curl)) { Log "curl.exe absent (Windows < 1803)"; exit 1 }',
-        'function DL($url, $file, $maxSec) {',
-        '  Log ("DL " + ([System.IO.Path]::GetFileName($file)) + " <- " + $url)',
-        '  $curlOut = & $curl --silent --show-error --location --insecure --max-time $maxSec -o $file $url 2>&1',
-        '  if ($LASTEXITCODE -ne 0) { Log ("curl exit " + $LASTEXITCODE + " : " + $curlOut); throw ("curl exit " + $LASTEXITCODE) }',
-        '  if (-not (Test-Path $file)) { throw ("fichier non créé : " + $file) }',
-        '  $sz = (Get-Item $file).Length',
-        '  Log ("  -> " + [Math]::Round($sz/1024) + " Ko")',
-        '  if ($sz -lt 100000) { throw ("trop petit (" + $sz + " o) — probablement page d''erreur") }',
-        '}',
-        'try {',
-        '  DL $vcUrl $vcFile 90',
-        '  try { DL $xamlUrl $xamlFile 90 } catch { Log ("UI.Xaml warn: " + $_.Exception.Message); $xamlFile = $null }',
-        '  DL $wgUrl $wgFile 600',
-        '} catch { Log ("DL fatal: " + $_.Exception.Message); exit 2 }',
-        'Log "DISM provision"',
-        '$dismExe = Join-Path $env:WINDIR "System32\\dism.exe"',
-        '$dismArgs = @("/Online", "/Add-ProvisionedAppxPackage", "/PackagePath:$wgFile", "/DependencyPackagePath:$vcFile", "/SkipLicense", "/LogPath:$dismLog", "/LogLevel:4")',
-        'if ($xamlFile -and (Test-Path $xamlFile)) { $dismArgs += "/DependencyPackagePath:$xamlFile" }',
-        '$dismOut = & $dismExe @dismArgs 2>&1',
-        'Log ("DISM exit: " + $LASTEXITCODE)',
-        'if ($LASTEXITCODE -ne 0) {',
-        '  Log ("DISM stdout/err: " + ($dismOut | Out-String).Substring(0, [Math]::Min(800, ($dismOut | Out-String).Length)))',
-        '  if (Test-Path $dismLog) {',
-        '    Log "--- DISM log (dernieres 30 lignes) ---"',
-        '    Get-Content $dismLog -Tail 30 | ForEach-Object { Log $_ }',
-        '  }',
-        '  exit $LASTEXITCODE',
-        '}',
-        // Initialise les sources pour SYSTEM (les sources sont per-user et
-        // sans ça la première commande échoue avec 0x8a15000f).
-        'try {',
-        '  $wg = Get-ChildItem (Join-Path $env:ProgramFiles "WindowsApps") -Filter "Microsoft.DesktopAppInstaller_*" -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1',
-        '  if ($wg) {',
-        '    $wgExe = Join-Path $wg.FullName "winget.exe"',
-        '    if (Test-Path $wgExe) {',
-        '      & $wgExe source reset --force 2>&1 | Out-Null',
-        '      & $wgExe source update --accept-source-agreements 2>&1 | Out-Null',
-        '      Log "source reset OK"',
-        '    }',
-        '  }',
-        '} catch { Log ("source reset warn: " + $_.Exception.Message) }',
-        'Log "OK"',
-    ].join('\r\n');
-    try { fs.writeFileSync(ps1File, '﻿' + script); }
-    catch (e) { return cb('écriture ps1: ' + e); }
-    var psExe = windir + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
-    var line = '"' + psExe + '" -NoProfile -ExecutionPolicy Bypass -NonInteractive -File "' + ps1File + '" > "' + logFile + '" 2>&1';
-    try { fs.writeFileSync(batFile, '@echo off\r\n' + line + '\r\n'); }
-    catch (e) { return cb('écriture bat: ' + e); }
-    L('install winget : pré-téléchargement bundles via MC tunnel');
-    // Pré-télécharge VCLibs + UIXaml via le canal plugin (marche même sans
-    // internet sur le poste tant que la connexion à MC marche).
-    var vcLocal = workDir + '\\vclibs.appx';
-    var xamlLocal = workDir + '\\uixaml.appx';
-    var wgLocal = workDir + '\\winget.msixbundle';
-    function preDownload(cb) {
-        L('bundle vclibs via tunnel…');
-        requestBundle('vclibs', vcLocal, function (err1) {
-            if (err1) { L('vclibs tunnel KO: ' + err1 + ' — fallback http'); }
-            L('bundle uixaml via tunnel…');
-            requestBundle('uixaml', xamlLocal, function (err2) {
-                if (err2) { L('uixaml tunnel KO: ' + err2 + ' — fallback http'); }
-                L('bundle winget via tunnel (216 Mo, ~5-10 min)…');
-                requestBundle('winget', wgLocal, function (err3) {
-                    if (err3) { L('winget tunnel KO: ' + err3 + ' — fallback http'); }
-                    cb();
-                });
-            });
-        });
-    }
-    preDownload(function () {
-        L('lancement DISM (PowerShell + curl)');
-        // Met à jour le script PS pour utiliser les fichiers locaux si présents.
-        var hasLocalVc = fs.existsSync(vcLocal) && fs.statSync(vcLocal).size > 100000;
-        var hasLocalXaml = fs.existsSync(xamlLocal) && fs.statSync(xamlLocal).size > 100000;
-        var hasLocalWg = fs.existsSync(wgLocal) && fs.statSync(wgLocal).size > 100000;
-        // Reécrit le script ps1 avec des références aux fichiers locaux quand
-        // disponibles (saute les DL curl).
-        var script2 = [
-            '$ErrorActionPreference = "Stop"',
-            '$progressLog = "' + progressLog.replace(/\\/g, '\\\\') + '"',
-            'function Log($m) { Add-Content -Path $progressLog -Value ((Get-Date -Format "HH:mm:ss") + " " + $m) -Encoding UTF8 }',
-            'Log "ps1 (post-tunnel) demarre"',
-            '$work = "' + workDir.replace(/\\/g, '\\\\') + '"',
-            '$vcFile = "' + vcLocal.replace(/\\/g, '\\\\') + '"',
-            '$xamlFile = "' + xamlLocal.replace(/\\/g, '\\\\') + '"',
-            '$wgFile = "' + wgLocal.replace(/\\/g, '\\\\') + '"',
-            '$dismLog = Join-Path $work "dism.log"',
-            'Log ("vcFile present: " + (Test-Path $vcFile))',
-            'Log ("xamlFile present: " + (Test-Path $xamlFile))',
-            'Log ("wgFile present: " + (Test-Path $wgFile))',
-            'if (-not (Test-Path $vcFile)) { Log "VCLibs absent — DISM va echouer"; exit 11 }',
-            'if (-not (Test-Path $wgFile)) { Log "winget absent — DISM va echouer"; exit 12 }',
-            'Log "DISM provision"',
-            '$dismExe = Join-Path $env:WINDIR "System32\\dism.exe"',
-            '$dismArgs = @("/Online", "/Add-ProvisionedAppxPackage", "/PackagePath:$wgFile", "/DependencyPackagePath:$vcFile", "/SkipLicense", "/LogPath:$dismLog", "/LogLevel:4")',
-            'if (Test-Path $xamlFile) { $dismArgs += "/DependencyPackagePath:$xamlFile" }',
-            '$dismOut = & $dismExe @dismArgs 2>&1',
-            'Log ("DISM exit: " + $LASTEXITCODE)',
-            'if ($LASTEXITCODE -ne 0) {',
-            '  Log ("DISM out: " + (($dismOut | Out-String).Substring(0, [Math]::Min(800, ($dismOut | Out-String).Length))))',
-            '  if (Test-Path $dismLog) { Get-Content $dismLog -Tail 30 | ForEach-Object { Log $_ } }',
-            '  exit $LASTEXITCODE',
-            '}',
-            'try {',
-            '  $wg = Get-ChildItem (Join-Path $env:ProgramFiles "WindowsApps") -Filter "Microsoft.DesktopAppInstaller_*" -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1',
-            '  if ($wg) {',
-            '    $wgExe = Join-Path $wg.FullName "winget.exe"',
-            '    if (Test-Path $wgExe) {',
-            '      & $wgExe source reset --force 2>&1 | Out-Null',
-            '      & $wgExe source update --accept-source-agreements 2>&1 | Out-Null',
-            '      Log "source reset OK"',
-            '    }',
-            '  }',
-            '} catch { Log ("source warn: " + $_.Exception.Message) }',
-            'Log "OK"',
-        ].join('\r\n');
-        try { fs.writeFileSync(ps1File, '﻿' + script2); } catch (e) { return cb('écriture ps1 (post): ' + e); }
-        runChild();
-    });
-    function runChild() {
-      try {
-        var child = cp.execFile(windir + '\\System32\\cmd.exe', ['/c', batFile]);
-        var done2 = false;
-        var startTs = Date.now();
-        var lastSize = 0;
-        // Tail PS log + heartbeat de vie (indépendant du contenu du log).
-        var tailTimer = setInterval(function () {
-            var elapsed = Math.round((Date.now() - startTs) / 1000);
-            try {
-                if (fs.existsSync(progressLog)) {
-                    var stat = fs.statSync(progressLog);
-                    if (stat.size !== lastSize) {
-                        var data = fs.readFileSync(progressLog, 'utf8').toString();
-                        var newLines = data.slice(lastSize).split(/\r?\n/).filter(Boolean);
-                        lastSize = stat.size;
-                        for (var i = 0; i < newLines.length; i++) {
-                            var ln = newLines[i].trim();
-                            if (ln) L('[install] ' + ln.slice(0, 200));
-                        }
-                        return;
-                    }
-                }
-            } catch (_) {}
-            L('install en cours… ' + elapsed + 's (logSize=' + lastSize + ')');
-        }, 5000);
-        function finish(err) {
-            if (done2) return; done2 = true;
-            try { clearInterval(tailTimer); } catch (_) {}
-            var out = '';
-            try { if (fs.existsSync(logFile)) out = require('fs').readFileSync(logFile, 'utf8').toString(); } catch (_) {}
-            // Cleanup tmp
-            try { fs.unlinkSync(ps1File); } catch (_) {}
-            try { fs.unlinkSync(logFile); } catch (_) {}
-            try { fs.unlinkSync(progressLog); } catch (_) {}
-            try { fs.unlinkSync(batFile); } catch (_) {}
-            try { fs.rmdirSync(workDir); } catch (_) {}
-            var tail = String(out || '').replace(/\r/g, '\n').split('\n').filter(Boolean).slice(-10).join(' | ');
-            if (tail) L('winget install log: ' + tail);
-            cb(err);
-        }
-        child.on('exit', function (code) { finish(code === 0 ? null : ('DISM exit ' + code)); });
-        setTimeout(function () { try { child.kill(); } catch (_) {} finish('timeout 10 min'); }, 10 * 60 * 1000);
-      } catch (e) { cb('spawn: ' + e); }
-    }
-}
-
 function doWingetInventory(data) {
+    // Récupère la liste des paquets installés (winget list) et la liste des
+    // mises à jour disponibles (winget upgrade --include-unknown). Renvoyé
+    // au serveur via pluginaction='wingetInventoryResult' avec un dispatchId.
     var fs = require('fs');
     var cp = require('child_process');
     var dispatchId = data.dispatchId;
-    var log = [];
-    var lastPing = 0;
-    function L(m) {
-        log.push(m); dbg(m);
-        // Ping périodique vers le serveur pour que l'UI puisse afficher
-        // l'avancement (sinon on a juste "Interrogation…" sans signal de vie).
-        var now = Date.now();
-        if (now - lastPing > 1000) {
-            lastPing = now;
-            try {
-                reply({
-                    pluginaction: 'wingetInventoryProgress',
-                    dispatchId: dispatchId,
-                    line: m,
-                    tail: log.slice(-5),
-                });
-            } catch (_) {}
-        }
-    }
     function send(payload) {
         var p = { pluginaction: 'wingetInventoryResult', dispatchId: dispatchId };
         Object.keys(payload).forEach(function (k) { p[k] = payload[k]; });
         reply(p);
     }
     var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
-
-    var wingetExe = findWingetExe();
-    function ensureWingetReady(cb) {
-        if (!wingetExe) {
-            if (data.autoInstall === false) return cb('winget non installé (App Installer requis)');
-            L('winget absent — auto-install');
-            return installWingetSystem(L, function (instErr) {
-                if (instErr) {
-                    return cb('auto-install échoué : ' + instErr + ' — log : ' + log.slice(-10).join(' | '));
-                }
-                wingetExe = findWingetExe();
-                if (!wingetExe) return cb('winget toujours introuvable après install');
-                L('winget installé : ' + wingetExe);
-                cb(null);
-            }, data.bundleUrls);
-        }
-        // Check version : si trop vieille, upgrade.
-        checkWingetVersion(wingetExe, function (ver) {
-            L('winget version : ' + (ver || '?'));
-            if (versionLess(ver, '1.4')) {
-                L('winget trop ancien (' + ver + ') — upgrade vers la dernière');
-                installWingetSystem(L, function (instErr) {
-                    if (instErr) {
-                        L('upgrade winget échoué : ' + instErr + ' — on continue avec l\'ancien');
-                        return cb(null);
-                    }
-                    wingetExe = findWingetExe();
-                    L('winget upgrade OK : ' + wingetExe);
-                    cb(null);
-                }, data.bundleUrls);
-                return;
+    var programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
+    var wingetExe = '';
+    try {
+        var wapps = programFiles + '\\WindowsApps';
+        var entries = fs.readdirSync(wapps);
+        for (var i = 0; i < entries.length; i++) {
+            if (/^Microsoft\.DesktopAppInstaller_/i.test(entries[i])) {
+                var c = wapps + '\\' + entries[i] + '\\winget.exe';
+                if (fs.existsSync(c)) { wingetExe = c; break; }
             }
-            cb(null);
-        });
-    }
-    ensureWingetReady(function (err) {
-        if (err) return send({ error: err, log: log.join('\n') });
-        continueInventory();
-    });
-    return;
-    function continueInventory() {
+        }
+    } catch (e) {}
+    if (!wingetExe) return send({ error: 'winget non installé (App Installer requis)' });
 
     var tmpRoot = (process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp');
     function toStr(buf) {
@@ -949,43 +562,16 @@ function doWingetInventory(data) {
         });
         return lines.slice(-30).join('\n');
     }
-    // --disable-interactivity : indispensable sous SYSTEM sans TTY, sinon
-    // winget se met en mode interactif et n'affiche rien (juste le spinner).
-    function doScan(retried) {
-        runWinget('list --source winget --accept-source-agreements --disable-interactivity', function (err1, out1) {
-            // 0x8a15000f = source manquante → on tente un reset une fois.
-            if (!retried && /8a15000f|source reset/i.test(out1 || '')) {
-                L('source error, reset puis retry');
-                return runWinget('source reset --force', function () {
-                    runWinget('source update --accept-source-agreements', function () {
-                        doScan(true);
-                    });
-                });
-            }
-            var installed = parseWingetTable(out1 || '');
-            // --include-unknown : ajouté en winget v1.4. Fallback sans le flag
-            // si winget plus ancien (output contient "Argument name was not
-            // recognized").
-            runWinget('upgrade --include-unknown --source winget --accept-source-agreements --disable-interactivity', function (err2, out2) {
-                if (/Argument name was not recognized/i.test(out2 || '')) {
-                    L('--include-unknown non supporté (winget ancien), retry sans');
-                    runWinget('upgrade --source winget --accept-source-agreements --disable-interactivity', function (_e, out2b) {
-                        finalize(installed, out1, parseWingetTable(out2b || ''), out2b);
-                    });
-                    return;
-                }
-                finalize(installed, out1, parseWingetTable(out2 || ''), out2);
+    runWinget('list --source winget --accept-source-agreements', function (err1, out1) {
+        var installed = parseWingetTable(out1 || '');
+        runWinget('upgrade --include-unknown --source winget --accept-source-agreements', function (err2, out2) {
+            var upgrades = parseWingetTable(out2 || '');
+            send({
+                installed: installed,
+                upgrades: upgrades,
+                rawList: snippet(out1 || ''),
+                rawUpgrade: snippet(out2 || ''),
             });
         });
-    }
-    function finalize(installed, out1, upgrades, out2) {
-        send({
-            installed: installed,
-            upgrades: upgrades,
-            rawList: snippet(out1 || ''),
-            rawUpgrade: snippet(out2 || ''),
-        });
-    }
-    doScan(false);
-    } // fin continueInventory
+    });
 }
