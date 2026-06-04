@@ -584,8 +584,25 @@ function installWingetSystem(L, cb, bundleUrls) {
     try {
         var child = cp.execFile(windir + '\\System32\\cmd.exe', ['/c', batFile]);
         var done2 = false;
+        // Tail le log PS toutes les 3s pour remonter l'avancement.
+        var lastSize = 0;
+        var tailTimer = setInterval(function () {
+            try {
+                if (!fs.existsSync(logFile)) return;
+                var stat = fs.statSync(logFile);
+                if (stat.size === lastSize) return;
+                var data = fs.readFileSync(logFile, 'utf8').toString();
+                var newLines = data.slice(lastSize).split(/\r?\n/).filter(Boolean);
+                lastSize = stat.size;
+                for (var i = 0; i < newLines.length; i++) {
+                    var ln = newLines[i].trim();
+                    if (ln && !/^[-\\\|/\s]+$/.test(ln)) L('[install] ' + ln.slice(0, 200));
+                }
+            } catch (_) {}
+        }, 3000);
         function finish(err) {
             if (done2) return; done2 = true;
+            try { clearInterval(tailTimer); } catch (_) {}
             var out = '';
             try { if (fs.existsSync(logFile)) out = require('fs').readFileSync(logFile, 'utf8').toString(); } catch (_) {}
             // Cleanup tmp
