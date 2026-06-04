@@ -104,27 +104,44 @@ function doInstall(data) {
             var extractDir = tmpDir + pathSep + 'extract';
             try { fs.mkdirSync(extractDir); } catch (e) {}
             L('extract via tar -> ' + extractDir);
-            var tarExe = (process.env.windir || process.env.WINDIR || 'C:\\Windows') + '\\System32\\tar.exe';
+            // Extraction via PowerShell Expand-Archive : plus fiable que tar
+            // sur les .zip Windows et permet de capturer stderr.
+            var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
+            var psExe = windir + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+            var extractLog = tmpDir + pathSep + 'extract.log';
+            var extractBat = tmpDir + pathSep + 'extract.bat';
+            var psLine = '"' + psExe + '" -NoProfile -ExecutionPolicy Bypass -NonInteractive'
+                       + ' -Command "Expand-Archive -LiteralPath \'' + downloadPath + '\' -DestinationPath \'' + extractDir + '\' -Force"';
+            try { fs.writeFileSync(extractBat, '@echo off\r\n' + psLine + ' > "' + extractLog + '" 2>&1\r\n'); }
+            catch (e) { L('write extractBat: ' + e); return done(-1, 'extractBat: ' + e); }
+            L('extract via Expand-Archive');
             try {
-                var tarChild = cp.execFile(tarExe, ['-xf', downloadPath, '-C', extractDir]);
-                var tarDone = false;
-                function onTarExit(code) {
-                    if (tarDone) return; tarDone = true;
-                    if (code !== 0) { L('tar exit ' + code); return done(-1, 'tar exit ' + code); }
+                var extChild = cp.execFile(windir + '\\System32\\cmd.exe', ['/c', extractBat]);
+                var extDone = false;
+                function onExtExit(code) {
+                    if (extDone) return; extDone = true;
+                    var stderr = '';
+                    try { if (fs.existsSync(extractLog)) stderr = fs.readFileSync(extractLog, 'utf8').toString(); } catch (_) {}
+                    try { fs.unlinkSync(extractLog); } catch (_) {}
+                    try { fs.unlinkSync(extractBat); } catch (_) {}
+                    if (code !== 0) {
+                        L('extract exit ' + code + ' : ' + (stderr || '(vide)').replace(/\r/g, '').slice(-400));
+                        return done(-1, 'extract exit ' + code);
+                    }
                     var target = extractDir + pathSep + archiveInstaller.replace(/\//g, pathSep);
                     if (!fs.existsSync(target)) { L('cible non trouvée: ' + target); return done(-1, 'cible introuvable dans le zip'); }
-                    L('tar OK, lancement: ' + target);
+                    L('extract OK, lancement: ' + target);
                     runInstaller(target, silentArgs, L, done);
                 }
-                tarChild.on('exit', onTarExit);
+                extChild.on('exit', onExtExit);
                 setTimeout(function () {
-                    if (tarDone) return;
-                    try { tarChild.kill(); } catch (_) {}
-                    tarDone = true;
-                    L('tar timeout 10 min'); done(-1, 'tar timeout');
+                    if (extDone) return;
+                    try { extChild.kill(); } catch (_) {}
+                    extDone = true;
+                    L('extract timeout 10 min'); done(-1, 'extract timeout');
                 }, 10 * 60 * 1000);
             } catch (e) {
-                L('tar spawn error: ' + e); done(-1, e);
+                L('extract spawn err: ' + e); done(-1, e);
             }
         } else {
             runInstaller(downloadPath, silentArgs, L, done);

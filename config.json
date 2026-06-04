@@ -1,7 +1,7 @@
 {
   "name": "softctl",
   "shortName": "softctl",
-  "version": "0.0.79",
+  "version": "0.0.80",
   "author": "V3locidad",
   "description": "Catalogue logiciels du Lycée + déploiement silencieux sur les postes via agents MeshCentral, avec remontée des résultats, historique persistant, et détection d'architecture (x86/x64/ARM64).",
   "hasAdminPanel": true,
