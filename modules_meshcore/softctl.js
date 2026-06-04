@@ -156,21 +156,24 @@ function doWingetInstall(data) {
     if (mode !== 'upgrade-all' && !packageId) return done(-1, 'packageId manquant');
 
     var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
-    var programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
-    var wingetExe = '';
-    try {
-        var wapps = programFiles + '\\WindowsApps';
-        var entries = fs.readdirSync(wapps);
-        for (var i = 0; i < entries.length; i++) {
-            if (/^Microsoft\.DesktopAppInstaller_/i.test(entries[i])) {
-                var candidate = wapps + '\\' + entries[i] + '\\winget.exe';
-                if (fs.existsSync(candidate)) { wingetExe = candidate; break; }
-            }
-        }
-    } catch (e) { L('scan WindowsApps: ' + e); }
+    var wingetExe = findWingetExe();
 
-    if (!wingetExe) { L('winget.exe introuvable'); return done(-1, 'winget non installé (App Installer requis)'); }
-    L('winget exe: ' + wingetExe);
+    function continueInstall() {
+        L('winget exe: ' + wingetExe);
+        runWingetCommand();
+    }
+    if (!wingetExe) {
+        L('winget absent — auto-install en cours');
+        installWingetSystem(L, function (instErr) {
+            if (instErr) return done(-1, 'auto-install winget échoué : ' + instErr);
+            wingetExe = findWingetExe();
+            if (!wingetExe) return done(-1, 'winget toujours introuvable après install');
+            continueInstall();
+        });
+        return;
+    }
+    continueInstall();
+    function runWingetCommand() {
 
     // On enveloppe dans cmd.exe /c pour les mêmes raisons que runInstaller
     // (MeshAgent en service bloque les stdio des process lancés direct).
@@ -319,6 +322,7 @@ function doWingetInstall(data) {
         L('spawn error: ' + e);
         done(-1, e);
     }
+    } // fin runWingetCommand
 }
 
 function runInstaller(target, silentArgs, L, done) {
@@ -430,32 +434,112 @@ function rmRf(p) {
     }
 }
 
-function doWingetInventory(data) {
-    // Récupère la liste des paquets installés (winget list) et la liste des
-    // mises à jour disponibles (winget upgrade --include-unknown). Renvoyé
-    // au serveur via pluginaction='wingetInventoryResult' avec un dispatchId.
+function findWingetExe() {
     var fs = require('fs');
-    var cp = require('child_process');
-    var dispatchId = data.dispatchId;
-    function send(payload) {
-        var p = { pluginaction: 'wingetInventoryResult', dispatchId: dispatchId };
-        Object.keys(payload).forEach(function (k) { p[k] = payload[k]; });
-        reply(p);
-    }
-    var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
     var programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
-    var wingetExe = '';
     try {
         var wapps = programFiles + '\\WindowsApps';
         var entries = fs.readdirSync(wapps);
         for (var i = 0; i < entries.length; i++) {
             if (/^Microsoft\.DesktopAppInstaller_/i.test(entries[i])) {
                 var c = wapps + '\\' + entries[i] + '\\winget.exe';
-                if (fs.existsSync(c)) { wingetExe = c; break; }
+                if (fs.existsSync(c)) return c;
             }
         }
     } catch (e) {}
-    if (!wingetExe) return send({ error: 'winget non installé (App Installer requis)' });
+    return '';
+}
+
+function installWingetSystem(L, cb) {
+    // Télécharge VCLibs + winget MSIXBundle puis provisionne pour tous les
+    // utilisateurs via DISM. Fonctionne en SYSTEM.
+    var fs = require('fs');
+    var cp = require('child_process');
+    var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
+    var tmpRoot = process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp';
+    var stamp = Date.now() + '_' + Math.floor(Math.random() * 1e9);
+    var workDir = tmpRoot + '\\softctl_winget_install_' + stamp;
+    var ps1File = workDir + '\\install.ps1';
+    var logFile = workDir + '\\install.log';
+    var batFile = workDir + '\\install.bat';
+    try { fs.mkdirSync(workDir); } catch (_) {}
+    var script = [
+        '$ErrorActionPreference = "Stop"',
+        '$ProgressPreference = "SilentlyContinue"',
+        '[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12',
+        '$work = "' + workDir.replace(/\\/g, '\\\\') + '"',
+        'New-Item -ItemType Directory -Force -Path $work | Out-Null',
+        '$vcUrl = "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx"',
+        '$wgUrl = "https://aka.ms/getwinget"',
+        '$vcFile = Join-Path $work "vclibs.appx"',
+        '$wgFile = Join-Path $work "winget.msixbundle"',
+        'Write-Output "Téléchargement VCLibs"',
+        'Invoke-WebRequest -Uri $vcUrl -OutFile $vcFile -UseBasicParsing',
+        'Write-Output "Téléchargement winget"',
+        'Invoke-WebRequest -Uri $wgUrl -OutFile $wgFile -UseBasicParsing',
+        'Write-Output "DISM provision"',
+        '$dismExe = Join-Path $env:WINDIR "System32\\dism.exe"',
+        '& $dismExe /Online /Quiet /Add-ProvisionedAppxPackage /PackagePath:"$wgFile" /DependencyPackagePath:"$vcFile" /SkipLicense',
+        'Write-Output "DISM exit: $LASTEXITCODE"',
+        'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+        'Write-Output "OK"',
+    ].join('\r\n');
+    try { fs.writeFileSync(ps1File, '﻿' + script); }
+    catch (e) { return cb('écriture ps1: ' + e); }
+    var psExe = windir + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+    var line = '"' + psExe + '" -NoProfile -ExecutionPolicy Bypass -NonInteractive -File "' + ps1File + '" > "' + logFile + '" 2>&1';
+    try { fs.writeFileSync(batFile, '@echo off\r\n' + line + '\r\n'); }
+    catch (e) { return cb('écriture bat: ' + e); }
+    L('install winget : téléchargement + DISM (peut prendre 2-5 min)');
+    try {
+        var child = cp.execFile(windir + '\\System32\\cmd.exe', ['/c', batFile]);
+        var done2 = false;
+        function finish(err) {
+            if (done2) return; done2 = true;
+            var out = '';
+            try { if (fs.existsSync(logFile)) out = require('fs').readFileSync(logFile, 'utf8').toString(); } catch (_) {}
+            // Cleanup tmp
+            try { fs.unlinkSync(ps1File); } catch (_) {}
+            try { fs.unlinkSync(logFile); } catch (_) {}
+            try { fs.unlinkSync(batFile); } catch (_) {}
+            try { fs.rmdirSync(workDir); } catch (_) {}
+            var tail = String(out || '').replace(/\r/g, '\n').split('\n').filter(Boolean).slice(-10).join(' | ');
+            if (tail) L('winget install log: ' + tail);
+            cb(err);
+        }
+        child.on('exit', function (code) { finish(code === 0 ? null : ('DISM exit ' + code)); });
+        setTimeout(function () { try { child.kill(); } catch (_) {} finish('timeout 10 min'); }, 10 * 60 * 1000);
+    } catch (e) { cb('spawn: ' + e); }
+}
+
+function doWingetInventory(data) {
+    var fs = require('fs');
+    var cp = require('child_process');
+    var dispatchId = data.dispatchId;
+    var log = [];
+    function L(m) { log.push(m); dbg(m); }
+    function send(payload) {
+        var p = { pluginaction: 'wingetInventoryResult', dispatchId: dispatchId };
+        Object.keys(payload).forEach(function (k) { p[k] = payload[k]; });
+        reply(p);
+    }
+    var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
+
+    var wingetExe = findWingetExe();
+    if (!wingetExe) {
+        // Auto-install si demandé (par défaut oui).
+        if (data.autoInstall === false) return send({ error: 'winget non installé (App Installer requis)' });
+        L('winget absent — auto-install en cours');
+        return installWingetSystem(L, function (instErr) {
+            if (instErr) return send({ error: 'auto-install winget échoué : ' + instErr, log: log.join('\n') });
+            wingetExe = findWingetExe();
+            if (!wingetExe) return send({ error: 'winget toujours introuvable après install', log: log.join('\n') });
+            L('winget installé : ' + wingetExe);
+            continueInventory();
+        });
+    }
+    continueInventory();
+    function continueInventory() {
 
     var tmpRoot = (process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp');
     function toStr(buf) {
@@ -574,4 +658,5 @@ function doWingetInventory(data) {
             });
         });
     });
+    } // fin continueInventory
 }
