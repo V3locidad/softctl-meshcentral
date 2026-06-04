@@ -107,21 +107,22 @@ function doInstall(data) {
             var tarExe = (process.env.windir || process.env.WINDIR || 'C:\\Windows') + '\\System32\\tar.exe';
             try {
                 var tarChild = cp.execFile(tarExe, ['-xf', downloadPath, '-C', extractDir]);
-                var tarMax = 10 * 60 * 1000, tarEl = 0;
-                var tarPoll = setInterval(function () {
-                    tarEl += 1000;
-                    if (typeof tarChild.exitCode === 'number') {
-                        clearInterval(tarPoll);
-                        if (tarChild.exitCode !== 0) { L('tar exit ' + tarChild.exitCode); return done(-1, 'tar exit ' + tarChild.exitCode); }
-                        var target = extractDir + pathSep + archiveInstaller.replace(/\//g, pathSep);
-                        if (!fs.existsSync(target)) { L('cible non trouvée: ' + target); return done(-1, 'cible introuvable dans le zip'); }
-                        runInstaller(target, silentArgs, L, done);
-                    } else if (tarEl >= tarMax) {
-                        clearInterval(tarPoll);
-                        try { tarChild.kill(); } catch (e) {}
-                        L('tar timeout'); done(-1, 'tar timeout');
-                    }
-                }, 1000);
+                var tarDone = false;
+                function onTarExit(code) {
+                    if (tarDone) return; tarDone = true;
+                    if (code !== 0) { L('tar exit ' + code); return done(-1, 'tar exit ' + code); }
+                    var target = extractDir + pathSep + archiveInstaller.replace(/\//g, pathSep);
+                    if (!fs.existsSync(target)) { L('cible non trouvée: ' + target); return done(-1, 'cible introuvable dans le zip'); }
+                    L('tar OK, lancement: ' + target);
+                    runInstaller(target, silentArgs, L, done);
+                }
+                tarChild.on('exit', onTarExit);
+                setTimeout(function () {
+                    if (tarDone) return;
+                    try { tarChild.kill(); } catch (_) {}
+                    tarDone = true;
+                    L('tar timeout 10 min'); done(-1, 'tar timeout');
+                }, 10 * 60 * 1000);
             } catch (e) {
                 L('tar spawn error: ' + e); done(-1, e);
             }
