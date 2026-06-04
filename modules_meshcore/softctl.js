@@ -191,7 +191,7 @@ function doWingetInstall(data) {
         // « Please specify --source ». On ne vise que la source winget.
         cmdLine += ' --source winget';
     }
-    cmdLine += ' --silent --accept-source-agreements --accept-package-agreements';
+    cmdLine += ' --silent --accept-source-agreements --accept-package-agreements --disable-interactivity';
     // --verbose force winget à écrire des lignes diagnostiques sur stdout
     // même en mode silent — sinon on capture un log vide quand il bail tôt.
     cmdLine += ' --verbose';
@@ -735,8 +735,10 @@ function doWingetInventory(data) {
         });
         return lines.slice(-30).join('\n');
     }
+    // --disable-interactivity : indispensable sous SYSTEM sans TTY, sinon
+    // winget se met en mode interactif et n'affiche rien (juste le spinner).
     function doScan(retried) {
-        runWinget('list --source winget --accept-source-agreements', function (err1, out1) {
+        runWinget('list --source winget --accept-source-agreements --disable-interactivity', function (err1, out1) {
             // 0x8a15000f = source manquante → on tente un reset une fois.
             if (!retried && /8a15000f|source reset/i.test(out1 || '')) {
                 L('source error, reset puis retry');
@@ -750,10 +752,10 @@ function doWingetInventory(data) {
             // --include-unknown : ajouté en winget v1.4. Fallback sans le flag
             // si winget plus ancien (output contient "Argument name was not
             // recognized").
-            runWinget('upgrade --include-unknown --source winget --accept-source-agreements', function (err2, out2) {
+            runWinget('upgrade --include-unknown --source winget --accept-source-agreements --disable-interactivity', function (err2, out2) {
                 if (/Argument name was not recognized/i.test(out2 || '')) {
                     L('--include-unknown non supporté (winget ancien), retry sans');
-                    runWinget('upgrade --source winget --accept-source-agreements', function (_e, out2b) {
+                    runWinget('upgrade --source winget --accept-source-agreements --disable-interactivity', function (_e, out2b) {
                         finalize(installed, out1, parseWingetTable(out2b || ''), out2b);
                     });
                     return;
