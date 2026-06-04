@@ -743,7 +743,7 @@
 
     function fetchAndRender() {
       var box = bg.querySelector('#invBody');
-      box.innerHTML = '<div class="empty">Interrogation de l\'agent (jusqu\'à 3 min)…</div>';
+      box.innerHTML = '<div class="empty">Interrogation de l\'agent…<br><br>Premier scan d\'un poste sans winget : 3-10 min (téléchargement du bundle MSIX + DISM provision).<br>Scans suivants : 30s.</div>';
       api('wingetInventory', { nodeId: nodeId }).then(function (r) {
         if (!r.ok) {
           box.innerHTML = '<div class="empty" style="color:#721c24">Erreur : ' + escapeHtml(r.error || 'inconnue') + '</div>';
