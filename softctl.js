@@ -242,13 +242,19 @@ module.exports.softctl = function (parent) {
     }
 
     function kickWingetFix() {
-        // Déploie winget-bootstrap aux postes en ligne flaggés bad,
-        // en respectant un cooldown pour ne pas re-tirer en boucle.
+        let boot;
         try {
             const cat = listCatalog();
-            const boot = (cat.softwares || []).find((s) => s.id === 'winget-bootstrap' && s.installerOk);
-            if (!boot) return 0;
-        } catch (_) { return 0; }
+            boot = (cat.softwares || []).find((s) => s.id === 'winget-bootstrap' && s.installerOk);
+            if (!boot) {
+                const found = (cat.softwares || []).find((s) => s.id === 'winget-bootstrap');
+                console.log('softctl: kickWingetFix → bootstrap absent du catalogue' + (found ? ' (présent mais installerOk=false : fichier zip manquant?)' : ''));
+                return 0;
+            }
+        } catch (e) {
+            console.log('softctl: kickWingetFix listCatalog err: ' + e.message);
+            return 0;
+        }
         const wsagents = (obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents) || {};
         const targets = [];
         Object.keys(wingetStatusCache).forEach((nid) => {
@@ -259,7 +265,14 @@ module.exports.softctl = function (parent) {
             if (Date.now() - last < WINGET_FIX_COOLDOWN) return;
             targets.push(nid);
         });
+        const cacheCount = Object.keys(wingetStatusCache).length;
+        const onlineCount = Object.keys(wsagents).length;
+        console.log('softctl: kickWingetFix → ' + targets.length + ' cibles (' + cacheCount + ' en cache, ' + onlineCount + ' en ligne, baseUrl=' + (wingetMaintenanceState.baseUrl || 'absente') + ')');
         if (!targets.length) return 0;
+        if (!wingetMaintenanceState.baseUrl) {
+            console.log('softctl: kickWingetFix annulé — baseUrl pas encore connue (ouvre softctl dans le browser une fois)');
+            return 0;
+        }
         // Dispatch via la pipeline deploy interne : on génère un deployment
         // factice qui appelle la machinerie install habituelle.
         const deploymentId = crypto.randomBytes(8).toString('hex');
@@ -283,16 +296,20 @@ module.exports.softctl = function (parent) {
                 const token = newDownloadToken('winget-bootstrap');
                 const base = wingetMaintenanceState.baseUrl || '';
                 const url = base + '/softctl-download/' + token;
+                // Récupère l'installer réel depuis le catalogue (peut ne pas
+                // être nommé winget-bootstrap.zip exactement)
+                const installerName = (boot && boot.installer) || 'winget-bootstrap.zip';
                 ws.send(JSON.stringify({
                     action: 'plugin', plugin: 'softctl', pluginaction: 'install',
                     dispatchId: dispatchId,
                     url: url,
-                    installer: 'winget-bootstrap.zip',
-                    archiveInstaller: 'install-winget.cmd',
-                    silentArgs: '',
+                    installer: installerName,
+                    archiveInstaller: (boot && boot.archiveInstaller) || 'install-winget.cmd',
+                    silentArgs: (boot && boot.silentArgs) || '',
                 }));
                 deployment.results['winget-bootstrap|' + nid] = { status: 'dispatched', time: Date.now() };
-            } catch (_) {}
+                console.log('softctl: auto-fix dispatched → ' + nid.slice(0, 16) + ' (' + installerName + ')');
+            } catch (e) { console.log('softctl: auto-fix err ' + nid + ': ' + e.message); }
         });
         saveHistory();
         return targets.length;
