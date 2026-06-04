@@ -169,7 +169,7 @@ function doWingetInstall(data) {
             wingetExe = findWingetExe();
             if (!wingetExe) return done(-1, 'winget toujours introuvable après install');
             continueInstall();
-        });
+        }, data.bundleUrls);
         return;
     }
     continueInstall();
@@ -503,7 +503,8 @@ function versionLess(a, b) {
     return false;
 }
 
-function installWingetSystem(L, cb) {
+function installWingetSystem(L, cb, bundleUrls) {
+    bundleUrls = bundleUrls || {};
     // Télécharge VCLibs + winget MSIXBundle puis provisionne pour tous les
     // utilisateurs via DISM. Fonctionne en SYSTEM.
     var fs = require('fs');
@@ -530,9 +531,11 @@ function installWingetSystem(L, cb) {
         '} catch { Write-Output ("proxy setup warn: " + $_.Exception.Message) }',
         '$work = "' + workDir.replace(/\\/g, '\\\\') + '"',
         'New-Item -ItemType Directory -Force -Path $work | Out-Null',
-        '$vcUrl = "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx"',
-        '$xamlUrl = "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx"',
-        '$wgUrl = "https://aka.ms/getwinget"',
+        '$vcUrl = ' + (bundleUrls.vclibs ? ('"' + bundleUrls.vclibs + '"') : '"https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx"'),
+        '$xamlUrl = ' + (bundleUrls.uixaml ? ('"' + bundleUrls.uixaml + '"') : '"https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx"'),
+        '$wgUrl = ' + (bundleUrls.winget ? ('"' + bundleUrls.winget + '"') : '"https://aka.ms/getwinget"'),
+        // Accepte les certs auto-signés (cas typique d'un MC en interne).
+        '[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }',
         '$vcFile = Join-Path $work "vclibs.appx"',
         '$xamlFile = Join-Path $work "uixaml.appx"',
         '$wgFile = Join-Path $work "winget.msixbundle"',
@@ -619,14 +622,13 @@ function doWingetInventory(data) {
             L('winget absent — auto-install');
             return installWingetSystem(L, function (instErr) {
                 if (instErr) {
-                    // On remonte le log capturé pour voir l'erreur DISM réelle.
                     return cb('auto-install échoué : ' + instErr + ' — log : ' + log.slice(-10).join(' | '));
                 }
                 wingetExe = findWingetExe();
                 if (!wingetExe) return cb('winget toujours introuvable après install');
                 L('winget installé : ' + wingetExe);
                 cb(null);
-            });
+            }, data.bundleUrls);
         }
         // Check version : si trop vieille, upgrade.
         checkWingetVersion(wingetExe, function (ver) {
@@ -641,7 +643,7 @@ function doWingetInventory(data) {
                     wingetExe = findWingetExe();
                     L('winget upgrade OK : ' + wingetExe);
                     cb(null);
-                });
+                }, data.bundleUrls);
                 return;
             }
             cb(null);
