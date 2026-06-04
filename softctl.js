@@ -276,32 +276,52 @@ module.exports.softctl = function (parent) {
         const dest = path.join(wingetCacheDir, entry.name);
         if (fs.existsSync(dest)) {
             const stat = fs.statSync(dest);
-            if (stat.size > 1024 * 100) return cb(null, dest);  // OK si plus de 100 Ko
+            if (stat.size > 1024 * 100) return cb(null, dest);
             try { fs.unlinkSync(dest); } catch (_) {}
         }
         const https = require('https');
+        const http = require('http');
         const tmp = dest + '.dl';
+        function pickLib(u) { return u.indexOf('http://') === 0 ? http : https; }
         function getUrl(u, redirCount) {
-            if (redirCount > 6) return cb(new Error('trop de redirections'));
-            https.get(u, { headers: { 'User-Agent': 'softctl' } }, (r) => {
+            if (redirCount > 10) return cb(new Error('trop de redirections sur ' + key));
+            const lib = pickLib(u);
+            const req = lib.get(u, { headers: { 'User-Agent': 'Mozilla/5.0 softctl', 'Accept': '*/*' } }, (r) => {
                 if ([301, 302, 303, 307, 308].indexOf(r.statusCode) !== -1 && r.headers.location) {
                     r.resume();
-                    return getUrl(r.headers.location, redirCount + 1);
+                    // Location peut être relatif
+                    let next = r.headers.location;
+                    if (next.indexOf('http') !== 0) {
+                        const url = require('url');
+                        next = url.resolve(u, next);
+                    }
+                    console.log('softctl: redirect ' + key + ' (' + r.statusCode + ') → ' + next.slice(0, 100));
+                    return getUrl(next, redirCount + 1);
                 }
                 if (r.statusCode !== 200) {
                     r.resume();
-                    return cb(new Error('HTTP ' + r.statusCode + ' sur ' + u));
+                    return cb(new Error('HTTP ' + r.statusCode + ' sur ' + u.slice(0, 100)));
                 }
                 const file = fs.createWriteStream(tmp);
                 r.pipe(file);
                 file.on('finish', () => {
                     file.close(() => {
-                        try { fs.renameSync(tmp, dest); } catch (e) { return cb(e); }
+                        try {
+                            const sz = fs.statSync(tmp).size;
+                            if (sz < 1024 * 100) {
+                                fs.unlinkSync(tmp);
+                                return cb(new Error('fichier trop petit (' + sz + 'o) — probablement page d\'erreur'));
+                            }
+                            fs.renameSync(tmp, dest);
+                            console.log('softctl: bundle ' + key + ' OK (' + Math.round(sz / 1024) + ' Ko)');
+                        } catch (e) { return cb(e); }
                         cb(null, dest);
                     });
                 });
                 file.on('error', (e) => { try { fs.unlinkSync(tmp); } catch (_) {} cb(e); });
-            }).on('error', (e) => { try { fs.unlinkSync(tmp); } catch (_) {} cb(e); });
+            });
+            req.setTimeout(60000, () => { try { req.destroy(new Error('timeout 60s')); } catch (_) {} });
+            req.on('error', (e) => { try { fs.unlinkSync(tmp); } catch (_) {} cb(e); });
         }
         console.log('softctl: téléchargement bundle ' + key + ' depuis ' + entry.url);
         getUrl(entry.url, 0);
@@ -895,6 +915,27 @@ module.exports.softctl = function (parent) {
             } catch (e) {
                 return sendJson(res, 200, { ok: false, error: e.message });
             }
+        }
+
+        if (action === 'wingetBundleStatus') {
+            // Diag : liste l'état du cache + force-prefetch si ?refresh=1
+            const refresh = req.query.refresh === '1';
+            if (refresh) {
+                Object.keys(WINGET_BUNDLE).forEach((k) => {
+                    const d = path.join(wingetCacheDir, WINGET_BUNDLE[k].name);
+                    try { if (fs.existsSync(d)) fs.unlinkSync(d); } catch (_) {}
+                });
+            }
+            ensureAllBundles((e) => {
+                const out = { error: e || null, files: {} };
+                Object.keys(WINGET_BUNDLE).forEach((k) => {
+                    const d = path.join(wingetCacheDir, WINGET_BUNDLE[k].name);
+                    if (fs.existsSync(d)) out.files[k] = { name: WINGET_BUNDLE[k].name, sizeKo: Math.round(fs.statSync(d).size / 1024) };
+                    else out.files[k] = { name: WINGET_BUNDLE[k].name, missing: true, url: WINGET_BUNDLE[k].url };
+                });
+                sendJson(res, 200, out);
+            });
+            return;
         }
 
         if (action === 'wingetInventory') {
