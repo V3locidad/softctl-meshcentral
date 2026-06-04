@@ -227,6 +227,54 @@ module.exports.softctl = function (parent) {
         try {
             if (!command) return;
             if (command.pluginaction === 'pong') return;
+            // Requête de bundle depuis l'agent (via WebSocket déjà établi avec MC).
+            // Marche même quand l'agent n'a aucun accès internet/HTTP.
+            if (command.pluginaction === 'wgBundleRequest') {
+                try {
+                    const wsa = obj.meshServer.webserver.wsagents[command.nodeId || ''];
+                    const target = wsa || (function () {
+                        // Si nodeId pas passé, on cherche l'agent qui a envoyé ça
+                        const all = obj.meshServer.webserver.wsagents || {};
+                        return Object.values(all).find((a) => a && a.dbNodeKey) || null;
+                    })();
+                    if (!target) return;
+                    const key = String(command.file || '');
+                    const meta = WINGET_BUNDLE[key];
+                    if (!meta) return;
+                    ensureWingetBundle(key, (err, filePath) => {
+                        if (err) {
+                            try { target.send(JSON.stringify({ action: 'plugin', plugin: 'softctl', pluginaction: 'wgBundleData', dispatchId: command.dispatchId, file: key, error: err.message })); } catch (_) {}
+                            return;
+                        }
+                        const CHUNK = 256 * 1024;
+                        const stat = fs.statSync(filePath);
+                        let offset = 0;
+                        const fd = fs.openSync(filePath, 'r');
+                        try { target.send(JSON.stringify({ action: 'plugin', plugin: 'softctl', pluginaction: 'wgBundleData', dispatchId: command.dispatchId, file: key, size: stat.size, start: true })); } catch (_) {}
+                        function nextChunk() {
+                            if (offset >= stat.size) {
+                                try { fs.closeSync(fd); } catch (_) {}
+                                try { target.send(JSON.stringify({ action: 'plugin', plugin: 'softctl', pluginaction: 'wgBundleData', dispatchId: command.dispatchId, file: key, end: true })); } catch (_) {}
+                                return;
+                            }
+                            const buf = Buffer.alloc(Math.min(CHUNK, stat.size - offset));
+                            fs.readSync(fd, buf, 0, buf.length, offset);
+                            offset += buf.length;
+                            try {
+                                target.send(JSON.stringify({
+                                    action: 'plugin', plugin: 'softctl', pluginaction: 'wgBundleData',
+                                    dispatchId: command.dispatchId, file: key,
+                                    offset: offset - buf.length, total: stat.size,
+                                    b64: buf.toString('base64'),
+                                }));
+                            } catch (_) {}
+                            setImmediate(nextChunk);
+                        }
+                        nextChunk();
+                    });
+                } catch (e) { console.log('softctl: wgBundleRequest err: ' + e.message); }
+                return;
+            }
             if (command.pluginaction === 'wingetInventoryProgress') {
                 inventoryProgress[command.dispatchId] = {
                     tail: command.tail || (command.line ? [command.line] : []),

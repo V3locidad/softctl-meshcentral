@@ -49,6 +49,9 @@ function consoleaction(args, rights, sessionid, parent) {
             case 'wingetInventory':
                 doWingetInventory(args);
                 return 'inventory started';
+            case 'wgBundleData':
+                handleBundleData(args);
+                return 'chunk handled';
             default:
                 return 'softctl: action inconnue ' + fnname;
         }
@@ -434,6 +437,69 @@ function rmRf(p) {
     }
 }
 
+// Étatd des téléchargements bundle via plugin channel.
+var _bundleDl = {};  // dispatchId -> { file, path, cb, received, expected }
+
+function handleBundleData(args) {
+    var dispatchId = args.dispatchId;
+    var st = _bundleDl[dispatchId];
+    if (!st) return;
+    var fs = require('fs');
+    if (args.error) {
+        try { fs.unlinkSync(st.path); } catch (_) {}
+        delete _bundleDl[dispatchId];
+        st.cb && st.cb(args.error);
+        return;
+    }
+    if (args.start) {
+        st.expected = args.size || 0;
+        st.received = 0;
+        try { fs.writeFileSync(st.path, ''); } catch (_) {}
+        return;
+    }
+    if (args.end) {
+        var done = _bundleDl[dispatchId];
+        delete _bundleDl[dispatchId];
+        if (done && done.cb) done.cb(null, done.path);
+        return;
+    }
+    if (args.b64) {
+        try {
+            var buf = (typeof Buffer !== 'undefined' && Buffer.from) ? Buffer.from(args.b64, 'base64') : decodeBase64(args.b64);
+            fs.appendFileSync(st.path, buf);
+            st.received += buf.length;
+        } catch (e) {}
+    }
+}
+
+function decodeBase64(s) {
+    // Fallback Duktape sans Buffer.
+    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    s = String(s).replace(/[^A-Za-z0-9+/=]/g, '');
+    var out = [];
+    for (var i = 0; i < s.length; i += 4) {
+        var n1 = chars.indexOf(s[i]),  n2 = chars.indexOf(s[i+1]),
+            n3 = chars.indexOf(s[i+2]), n4 = chars.indexOf(s[i+3]);
+        out.push((n1 << 2) | (n2 >> 4));
+        if (s[i+2] !== '=') out.push(((n2 & 15) << 4) | (n3 >> 2));
+        if (s[i+3] !== '=') out.push(((n3 & 3) << 6) | n4);
+    }
+    return Buffer.from ? Buffer.from(out) : out;
+}
+
+function requestBundle(key, destPath, cb) {
+    var dispatchId = 'wgdl_' + Date.now() + '_' + Math.floor(Math.random() * 1e9);
+    _bundleDl[dispatchId] = { file: key, path: destPath, cb: cb, received: 0, expected: 0 };
+    reply({ pluginaction: 'wgBundleRequest', dispatchId: dispatchId, file: key });
+    // Timeout 5 min
+    setTimeout(function () {
+        if (_bundleDl[dispatchId]) {
+            delete _bundleDl[dispatchId];
+            cb('timeout 5 min sur bundle ' + key);
+        }
+    }, 5 * 60 * 1000);
+}
+
 function findWingetExe() {
     var fs = require('fs');
     var programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
@@ -589,8 +655,79 @@ function installWingetSystem(L, cb, bundleUrls) {
     var line = '"' + psExe + '" -NoProfile -ExecutionPolicy Bypass -NonInteractive -File "' + ps1File + '" > "' + logFile + '" 2>&1';
     try { fs.writeFileSync(batFile, '@echo off\r\n' + line + '\r\n'); }
     catch (e) { return cb('écriture bat: ' + e); }
-    L('install winget : téléchargement + DISM (peut prendre 2-5 min)');
-    try {
+    L('install winget : pré-téléchargement bundles via MC tunnel');
+    // Pré-télécharge VCLibs + UIXaml via le canal plugin (marche même sans
+    // internet sur le poste tant que la connexion à MC marche).
+    var vcLocal = workDir + '\\vclibs.appx';
+    var xamlLocal = workDir + '\\uixaml.appx';
+    var wgLocal = workDir + '\\winget.msixbundle';
+    function preDownload(cb) {
+        L('bundle vclibs via tunnel…');
+        requestBundle('vclibs', vcLocal, function (err1) {
+            if (err1) { L('vclibs tunnel KO: ' + err1 + ' — fallback http'); }
+            L('bundle uixaml via tunnel…');
+            requestBundle('uixaml', xamlLocal, function (err2) {
+                if (err2) { L('uixaml tunnel KO: ' + err2 + ' — fallback http'); }
+                L('bundle winget via tunnel (216 Mo, ~5-10 min)…');
+                requestBundle('winget', wgLocal, function (err3) {
+                    if (err3) { L('winget tunnel KO: ' + err3 + ' — fallback http'); }
+                    cb();
+                });
+            });
+        });
+    }
+    preDownload(function () {
+        L('lancement DISM (PowerShell + curl)');
+        // Met à jour le script PS pour utiliser les fichiers locaux si présents.
+        var hasLocalVc = fs.existsSync(vcLocal) && fs.statSync(vcLocal).size > 100000;
+        var hasLocalXaml = fs.existsSync(xamlLocal) && fs.statSync(xamlLocal).size > 100000;
+        var hasLocalWg = fs.existsSync(wgLocal) && fs.statSync(wgLocal).size > 100000;
+        // Reécrit le script ps1 avec des références aux fichiers locaux quand
+        // disponibles (saute les DL curl).
+        var script2 = [
+            '$ErrorActionPreference = "Stop"',
+            '$progressLog = "' + progressLog.replace(/\\/g, '\\\\') + '"',
+            'function Log($m) { Add-Content -Path $progressLog -Value ((Get-Date -Format "HH:mm:ss") + " " + $m) -Encoding UTF8 }',
+            'Log "ps1 (post-tunnel) demarre"',
+            '$work = "' + workDir.replace(/\\/g, '\\\\') + '"',
+            '$vcFile = "' + vcLocal.replace(/\\/g, '\\\\') + '"',
+            '$xamlFile = "' + xamlLocal.replace(/\\/g, '\\\\') + '"',
+            '$wgFile = "' + wgLocal.replace(/\\/g, '\\\\') + '"',
+            '$dismLog = Join-Path $work "dism.log"',
+            'Log ("vcFile present: " + (Test-Path $vcFile))',
+            'Log ("xamlFile present: " + (Test-Path $xamlFile))',
+            'Log ("wgFile present: " + (Test-Path $wgFile))',
+            'if (-not (Test-Path $vcFile)) { Log "VCLibs absent — DISM va echouer"; exit 11 }',
+            'if (-not (Test-Path $wgFile)) { Log "winget absent — DISM va echouer"; exit 12 }',
+            'Log "DISM provision"',
+            '$dismExe = Join-Path $env:WINDIR "System32\\dism.exe"',
+            '$dismArgs = @("/Online", "/Add-ProvisionedAppxPackage", "/PackagePath:$wgFile", "/DependencyPackagePath:$vcFile", "/SkipLicense", "/LogPath:$dismLog", "/LogLevel:4")',
+            'if (Test-Path $xamlFile) { $dismArgs += "/DependencyPackagePath:$xamlFile" }',
+            '$dismOut = & $dismExe @dismArgs 2>&1',
+            'Log ("DISM exit: " + $LASTEXITCODE)',
+            'if ($LASTEXITCODE -ne 0) {',
+            '  Log ("DISM out: " + (($dismOut | Out-String).Substring(0, [Math]::Min(800, ($dismOut | Out-String).Length))))',
+            '  if (Test-Path $dismLog) { Get-Content $dismLog -Tail 30 | ForEach-Object { Log $_ } }',
+            '  exit $LASTEXITCODE',
+            '}',
+            'try {',
+            '  $wg = Get-ChildItem (Join-Path $env:ProgramFiles "WindowsApps") -Filter "Microsoft.DesktopAppInstaller_*" -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1',
+            '  if ($wg) {',
+            '    $wgExe = Join-Path $wg.FullName "winget.exe"',
+            '    if (Test-Path $wgExe) {',
+            '      & $wgExe source reset --force 2>&1 | Out-Null',
+            '      & $wgExe source update --accept-source-agreements 2>&1 | Out-Null',
+            '      Log "source reset OK"',
+            '    }',
+            '  }',
+            '} catch { Log ("source warn: " + $_.Exception.Message) }',
+            'Log "OK"',
+        ].join('\r\n');
+        try { fs.writeFileSync(ps1File, '﻿' + script2); } catch (e) { return cb('écriture ps1 (post): ' + e); }
+        runChild();
+    });
+    function runChild() {
+      try {
         var child = cp.execFile(windir + '\\System32\\cmd.exe', ['/c', batFile]);
         var done2 = false;
         var startTs = Date.now();
@@ -632,7 +769,8 @@ function installWingetSystem(L, cb, bundleUrls) {
         }
         child.on('exit', function (code) { finish(code === 0 ? null : ('DISM exit ' + code)); });
         setTimeout(function () { try { child.kill(); } catch (_) {} finish('timeout 10 min'); }, 10 * 60 * 1000);
-    } catch (e) { cb('spawn: ' + e); }
+      } catch (e) { cb('spawn: ' + e); }
+    }
 }
 
 function doWingetInventory(data) {
