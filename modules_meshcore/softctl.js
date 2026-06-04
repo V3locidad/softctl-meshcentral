@@ -517,9 +517,18 @@ function installWingetSystem(L, cb, bundleUrls) {
     var logFile = workDir + '\\install.log';
     var batFile = workDir + '\\install.bat';
     try { fs.mkdirSync(workDir); } catch (_) {}
+    var progressLog = workDir + '\\progress.log';
     var script = [
         '$ErrorActionPreference = "Stop"',
         '$ProgressPreference = "SilentlyContinue"',
+        '$progressLog = "' + progressLog.replace(/\\/g, '\\\\') + '"',
+        // Buffer-bypass : on appende directement dans le log à chaque étape
+        // (Write-Output redirigé via cmd > est bufferisé et reste vide).
+        'function Log($m) {',
+        '  $ts = Get-Date -Format "HH:mm:ss"',
+        '  Add-Content -Path $progressLog -Value ($ts + " " + $m) -Encoding UTF8',
+        '}',
+        'Log "ps1 demarre"',
         '$work = "' + workDir.replace(/\\/g, '\\\\') + '"',
         'New-Item -ItemType Directory -Force -Path $work | Out-Null',
         '$vcUrl = ' + (bundleUrls.vclibs ? ('"' + bundleUrls.vclibs + '"') : '"https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx"'),
@@ -530,29 +539,32 @@ function installWingetSystem(L, cb, bundleUrls) {
         '$wgFile = Join-Path $work "winget.msixbundle"',
         '$dismLog = Join-Path $work "dism.log"',
         '$curl = Join-Path $env:WINDIR "System32\\curl.exe"',
-        'if (-not (Test-Path $curl)) { Write-Output "curl.exe absent (Windows < 1803)"; exit 1 }',
+        'if (-not (Test-Path $curl)) { Log "curl.exe absent (Windows < 1803)"; exit 1 }',
         'function DL($url, $file, $maxSec) {',
-        '  Write-Output ("DL " + ([System.IO.Path]::GetFileName($file)) + " <- " + $url)',
-        '  & $curl --silent --show-error --location --insecure --max-time $maxSec -o $file $url 2>&1 | ForEach-Object { Write-Output $_ }',
-        '  if ($LASTEXITCODE -ne 0) { throw ("curl exit " + $LASTEXITCODE + " sur " + $url) }',
+        '  Log ("DL " + ([System.IO.Path]::GetFileName($file)) + " <- " + $url)',
+        '  $curlOut = & $curl --silent --show-error --location --insecure --max-time $maxSec -o $file $url 2>&1',
+        '  if ($LASTEXITCODE -ne 0) { Log ("curl exit " + $LASTEXITCODE + " : " + $curlOut); throw ("curl exit " + $LASTEXITCODE) }',
         '  if (-not (Test-Path $file)) { throw ("fichier non créé : " + $file) }',
         '  $sz = (Get-Item $file).Length',
-        '  Write-Output ("  -> " + [Math]::Round($sz/1024) + " Ko")',
-        '  if ($sz -lt 100000) { throw ("trop petit (" + $sz + " o) — probablement page d\'erreur") }',
+        '  Log ("  -> " + [Math]::Round($sz/1024) + " Ko")',
+        '  if ($sz -lt 100000) { throw ("trop petit (" + $sz + " o) — probablement page d''erreur") }',
         '}',
-        'DL $vcUrl $vcFile 90',
-        'try { DL $xamlUrl $xamlFile 90 } catch { Write-Output ("UI.Xaml warn: " + $_.Exception.Message); $xamlFile = $null }',
-        'DL $wgUrl $wgFile 600',
-        'Write-Output "DISM provision"',
+        'try {',
+        '  DL $vcUrl $vcFile 90',
+        '  try { DL $xamlUrl $xamlFile 90 } catch { Log ("UI.Xaml warn: " + $_.Exception.Message); $xamlFile = $null }',
+        '  DL $wgUrl $wgFile 600',
+        '} catch { Log ("DL fatal: " + $_.Exception.Message); exit 2 }',
+        'Log "DISM provision"',
         '$dismExe = Join-Path $env:WINDIR "System32\\dism.exe"',
         '$dismArgs = @("/Online", "/Add-ProvisionedAppxPackage", "/PackagePath:$wgFile", "/DependencyPackagePath:$vcFile", "/SkipLicense", "/LogPath:$dismLog", "/LogLevel:4")',
         'if ($xamlFile -and (Test-Path $xamlFile)) { $dismArgs += "/DependencyPackagePath:$xamlFile" }',
-        '& $dismExe @dismArgs 2>&1 | Out-String -Stream | ForEach-Object { Write-Output $_ }',
-        'Write-Output "DISM exit: $LASTEXITCODE"',
+        '$dismOut = & $dismExe @dismArgs 2>&1',
+        'Log ("DISM exit: " + $LASTEXITCODE)',
         'if ($LASTEXITCODE -ne 0) {',
+        '  Log ("DISM stdout/err: " + ($dismOut | Out-String).Substring(0, [Math]::Min(800, ($dismOut | Out-String).Length)))',
         '  if (Test-Path $dismLog) {',
-        '    Write-Output "--- DISM log (dernieres 30 lignes) ---"',
-        '    Get-Content $dismLog -Tail 30 | ForEach-Object { Write-Output $_ }',
+        '    Log "--- DISM log (dernieres 30 lignes) ---"',
+        '    Get-Content $dismLog -Tail 30 | ForEach-Object { Log $_ }',
         '  }',
         '  exit $LASTEXITCODE',
         '}',
@@ -565,11 +577,11 @@ function installWingetSystem(L, cb, bundleUrls) {
         '    if (Test-Path $wgExe) {',
         '      & $wgExe source reset --force 2>&1 | Out-Null',
         '      & $wgExe source update --accept-source-agreements 2>&1 | Out-Null',
-        '      Write-Output "source reset OK"',
+        '      Log "source reset OK"',
         '    }',
         '  }',
-        '} catch { Write-Output ("source reset warn: " + $_.Exception.Message) }',
-        'Write-Output "OK"',
+        '} catch { Log ("source reset warn: " + $_.Exception.Message) }',
+        'Log "OK"',
     ].join('\r\n');
     try { fs.writeFileSync(ps1File, '﻿' + script); }
     catch (e) { return cb('écriture ps1: ' + e); }
@@ -587,22 +599,21 @@ function installWingetSystem(L, cb, bundleUrls) {
         var tailTimer = setInterval(function () {
             var elapsed = Math.round((Date.now() - startTs) / 1000);
             try {
-                if (fs.existsSync(logFile)) {
-                    var stat = fs.statSync(logFile);
+                if (fs.existsSync(progressLog)) {
+                    var stat = fs.statSync(progressLog);
                     if (stat.size !== lastSize) {
-                        var data = fs.readFileSync(logFile, 'utf8').toString();
+                        var data = fs.readFileSync(progressLog, 'utf8').toString();
                         var newLines = data.slice(lastSize).split(/\r?\n/).filter(Boolean);
                         lastSize = stat.size;
                         for (var i = 0; i < newLines.length; i++) {
                             var ln = newLines[i].trim();
-                            if (ln && !/^[-\\\|/\s]+$/.test(ln)) L('[install] ' + ln.slice(0, 200));
+                            if (ln) L('[install] ' + ln.slice(0, 200));
                         }
                         return;
                     }
                 }
             } catch (_) {}
-            // Pas de nouveau contenu : ping de vie (throttle 1s gère).
-            L('install en cours… ' + elapsed + 's écoulées (logSize=' + lastSize + ')');
+            L('install en cours… ' + elapsed + 's (logSize=' + lastSize + ')');
         }, 5000);
         function finish(err) {
             if (done2) return; done2 = true;
@@ -612,6 +623,7 @@ function installWingetSystem(L, cb, bundleUrls) {
             // Cleanup tmp
             try { fs.unlinkSync(ps1File); } catch (_) {}
             try { fs.unlinkSync(logFile); } catch (_) {}
+            try { fs.unlinkSync(progressLog); } catch (_) {}
             try { fs.unlinkSync(batFile); } catch (_) {}
             try { fs.rmdirSync(workDir); } catch (_) {}
             var tail = String(out || '').replace(/\r/g, '\n').split('\n').filter(Boolean).slice(-10).join(' | ');
