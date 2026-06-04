@@ -746,7 +746,46 @@
       box.innerHTML = '<div class="empty">Interrogation de l\'agent (jusqu\'à 3 min)…</div>';
       api('wingetInventory', { nodeId: nodeId }).then(function (r) {
         if (!r.ok) {
-          box.innerHTML = '<div class="empty" style="color:#721c24">Erreur : ' + escapeHtml(r.error || 'inconnue') + '</div>';
+          var html = '<div class="empty" style="color:#721c24">Erreur : ' + escapeHtml(r.error || 'inconnue') + '</div>';
+          // Si l'erreur indique winget absent ET que le catalogue contient un
+          // soft "winget-bootstrap", on propose un bouton d'install auto.
+          if (/winget non install|App Installer requis/i.test(r.error || '')) {
+            var hasBootstrap = (softwares || []).some(function (s) { return s.id === 'winget-bootstrap'; });
+            if (hasBootstrap) {
+              html += '<div style="padding:10px;text-align:center"><button id="bootBtn" class="primary">⚙ Installer Winget via NAS</button></div>';
+            } else {
+              html += '<div style="padding:10px;text-align:center;color:#666;font-size:11px">Ajoute un soft <b>winget-bootstrap</b> au catalogue NAS pour activer l\'install automatique.</div>';
+            }
+          }
+          box.innerHTML = html;
+          var bootBtn = document.getElementById('bootBtn');
+          if (bootBtn) {
+            bootBtn.onclick = function () {
+              bootBtn.disabled = true;
+              box.innerHTML = '<div class="empty">📥 Déploiement Winget Bootstrap depuis le NAS…<br><br>Téléchargement + DISM (2-5 min). Re-cliquera l\'inventaire à la fin.</div>';
+              api('deploy', null, { softIds: ['winget-bootstrap'], nodeIds: [nodeId] }).then(function (r2) {
+                if (r2.error) { box.innerHTML = '<div class="empty" style="color:#721c24">Erreur déploiement : ' + escapeHtml(r2.error) + '</div>'; return; }
+                // Poll le déploiement jusqu'à terminaison, puis retry l'inventaire.
+                var depId = r2.deploymentId;
+                var poll = setInterval(function () {
+                  api('deployment', { id: depId }).then(function (d) {
+                    if (!d || !d.deployment) return;
+                    var key = 'winget-bootstrap|' + nodeId;
+                    var res = (d.deployment.results || {})[key];
+                    if (res && (res.status === 'success' || res.status === 'fail' || res.status === 'skipped')) {
+                      clearInterval(poll);
+                      if (res.status === 'success' || res.status === 'skipped') {
+                        // Relance l'inventaire (winget devrait être là maintenant)
+                        fetchAndRender();
+                      } else {
+                        box.innerHTML = '<div class="empty" style="color:#721c24">Bootstrap KO : ' + escapeHtml(res.error || ('exit ' + res.exitCode)) + '</div>';
+                      }
+                    }
+                  });
+                }, 4000);
+              });
+            };
+          }
           return;
         }
         var installed = r.installed || [];
