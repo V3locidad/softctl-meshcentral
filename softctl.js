@@ -27,6 +27,7 @@ const WINGET_BUNDLE = {
     winget: { name: 'winget.msixbundle', url: 'https://aka.ms/getwinget' },
 };
 const wingetCacheDir = require('path').join(__dirname, 'winget-cache');
+const bundledDir = require('path').join(__dirname, 'bundled');
 const TOKEN_TTL_MS = 30 * 60 * 1000;
 const REPORT_TTL_MS = 2 * 60 * 60 * 1000;  // 2 h, le temps qu'un gros install termine
 
@@ -279,6 +280,19 @@ module.exports.softctl = function (parent) {
             if (stat.size > 1024 * 100) return cb(null, dest);
             try { fs.unlinkSync(dest); } catch (_) {}
         }
+        // Fallback bundled : si le repo softctl/bundled/<file> existe, on
+        // l'utilise directement sans tenter de download. Pratique pour les
+        // serveurs MC sans internet.
+        const bundledFile = path.join(bundledDir, entry.name);
+        if (fs.existsSync(bundledFile) && fs.statSync(bundledFile).size > 1024 * 100) {
+            try {
+                fs.copyFileSync(bundledFile, dest);
+                console.log('softctl: bundle ' + key + ' copié depuis bundled/');
+                return cb(null, dest);
+            } catch (e) {
+                console.log('softctl: copie bundled ' + key + ' échoue : ' + e.message);
+            }
+        }
         const https = require('https');
         const http = require('http');
         const tmp = dest + '.dl';
@@ -320,8 +334,13 @@ module.exports.softctl = function (parent) {
                 });
                 file.on('error', (e) => { try { fs.unlinkSync(tmp); } catch (_) {} cb(e); });
             });
-            req.setTimeout(60000, () => { try { req.destroy(new Error('timeout 60s')); } catch (_) {} });
-            req.on('error', (e) => { try { fs.unlinkSync(tmp); } catch (_) {} cb(e); });
+            req.setTimeout(60000, () => { try { req.destroy(new Error('timeout 60s sur ' + u.slice(0, 80))); } catch (_) {} });
+            req.on('error', (e) => {
+                try { fs.unlinkSync(tmp); } catch (_) {}
+                const msg = (e && (e.message || e.code)) || 'erreur réseau inconnue';
+                console.log('softctl: erreur DL ' + key + ' : ' + msg);
+                cb(new Error(msg));
+            });
         }
         console.log('softctl: téléchargement bundle ' + key + ' depuis ' + entry.url);
         getUrl(entry.url, 0);
@@ -333,7 +352,7 @@ module.exports.softctl = function (parent) {
             if (i >= keys.length) return cb(errs.length ? errs.join('; ') : null);
             const k = keys[i++];
             ensureWingetBundle(k, (e) => {
-                if (e) errs.push(k + ': ' + e.message);
+                if (e) errs.push(k + ': ' + (e.message || e.toString() || 'erreur sans message'));
                 next();
             });
         }
