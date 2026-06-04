@@ -386,6 +386,19 @@ module.exports.softctl = function (parent) {
             };
             saveHistory();
             console.log('softctl: installComplete ' + entry.softId + ' on ' + entry.nodeId + ' exit=' + command.exit);
+            // Si c'était un install de winget-bootstrap réussi → invalide
+            // le cache wingetCheck et déclenche un re-check immédiat.
+            if (entry.softId === 'winget-bootstrap' && command.exit === 0) {
+                delete wingetStatusCache[entry.nodeId];
+                try {
+                    const wsa = (obj.meshServer.webserver.wsagents || {})[entry.nodeId];
+                    if (wsa && typeof wsa.send === 'function') {
+                        const did = 'wgchk-' + crypto.randomBytes(6).toString('hex');
+                        wingetCheckPending[did] = entry.nodeId;
+                        wsa.send(JSON.stringify({ action: 'plugin', plugin: 'softctl', pluginaction: 'wingetCheck', dispatchId: did }));
+                    }
+                } catch (_) {}
+            }
         } catch (e) {
             console.log('softctl: serveraction error: ' + e.message);
         }
