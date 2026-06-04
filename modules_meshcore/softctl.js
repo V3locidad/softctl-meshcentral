@@ -541,11 +541,11 @@ function installWingetSystem(L, cb, bundleUrls) {
         '$wgFile = Join-Path $work "winget.msixbundle"',
         '$dismLog = Join-Path $work "dism.log"',
         'Write-Output "DL VCLibs"',
-        'Invoke-WebRequest -Uri $vcUrl -OutFile $vcFile -UseBasicParsing ',
+        'Invoke-WebRequest -Uri $vcUrl -OutFile $vcFile -UseBasicParsing -TimeoutSec 60',
         'Write-Output "DL UI.Xaml"',
-        'try { Invoke-WebRequest -Uri $xamlUrl -OutFile $xamlFile -UseBasicParsing  } catch { Write-Output ("UI.Xaml DL warn: " + $_.Exception.Message); $xamlFile = $null }',
+        'try { Invoke-WebRequest -Uri $xamlUrl -OutFile $xamlFile -UseBasicParsing -TimeoutSec 60 } catch { Write-Output ("UI.Xaml DL warn: " + $_.Exception.Message); $xamlFile = $null }',
         'Write-Output "DL winget"',
-        'Invoke-WebRequest -Uri $wgUrl -OutFile $wgFile -UseBasicParsing ',
+        'Invoke-WebRequest -Uri $wgUrl -OutFile $wgFile -UseBasicParsing -TimeoutSec 300',
         'Write-Output "DISM provision"',
         '$dismExe = Join-Path $env:WINDIR "System32\\dism.exe"',
         '$dismArgs = @("/Online", "/Add-ProvisionedAppxPackage", "/PackagePath:$wgFile", "/DependencyPackagePath:$vcFile", "/SkipLicense", "/LogPath:$dismLog", "/LogLevel:4")',
@@ -584,22 +584,29 @@ function installWingetSystem(L, cb, bundleUrls) {
     try {
         var child = cp.execFile(windir + '\\System32\\cmd.exe', ['/c', batFile]);
         var done2 = false;
-        // Tail le log PS toutes les 3s pour remonter l'avancement.
+        var startTs = Date.now();
         var lastSize = 0;
+        // Tail PS log + heartbeat de vie (indépendant du contenu du log).
         var tailTimer = setInterval(function () {
+            var elapsed = Math.round((Date.now() - startTs) / 1000);
             try {
-                if (!fs.existsSync(logFile)) return;
-                var stat = fs.statSync(logFile);
-                if (stat.size === lastSize) return;
-                var data = fs.readFileSync(logFile, 'utf8').toString();
-                var newLines = data.slice(lastSize).split(/\r?\n/).filter(Boolean);
-                lastSize = stat.size;
-                for (var i = 0; i < newLines.length; i++) {
-                    var ln = newLines[i].trim();
-                    if (ln && !/^[-\\\|/\s]+$/.test(ln)) L('[install] ' + ln.slice(0, 200));
+                if (fs.existsSync(logFile)) {
+                    var stat = fs.statSync(logFile);
+                    if (stat.size !== lastSize) {
+                        var data = fs.readFileSync(logFile, 'utf8').toString();
+                        var newLines = data.slice(lastSize).split(/\r?\n/).filter(Boolean);
+                        lastSize = stat.size;
+                        for (var i = 0; i < newLines.length; i++) {
+                            var ln = newLines[i].trim();
+                            if (ln && !/^[-\\\|/\s]+$/.test(ln)) L('[install] ' + ln.slice(0, 200));
+                        }
+                        return;
+                    }
                 }
             } catch (_) {}
-        }, 3000);
+            // Pas de nouveau contenu : ping de vie (throttle 1s gère).
+            L('install en cours… ' + elapsed + 's écoulées (logSize=' + lastSize + ')');
+        }, 5000);
         function finish(err) {
             if (done2) return; done2 = true;
             try { clearInterval(tailTimer); } catch (_) {}
@@ -630,7 +637,7 @@ function doWingetInventory(data) {
         // Ping périodique vers le serveur pour que l'UI puisse afficher
         // l'avancement (sinon on a juste "Interrogation…" sans signal de vie).
         var now = Date.now();
-        if (now - lastPing > 3000) {
+        if (now - lastPing > 1000) {
             lastPing = now;
             try {
                 reply({
