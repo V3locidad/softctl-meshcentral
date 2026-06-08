@@ -138,14 +138,28 @@ function doGlpiAgentInstall(data) {
         }, timeoutMs);
     }
 
-    // Étape 1 : détecte la version installée (sans rien télécharger)
+    // Étape 1 : détecte la version installée (sans rien télécharger).
+    // GLPI Agent v1.6.x stocke la version dans HKLM\SOFTWARE\GLPI-Agent\Installer\Version,
+    // les nouvelles versions parfois à un autre endroit. On essaye plusieurs paths
+    // puis fallback sur DisplayVersion du registre Uninstall.
     var detectPs = ''
         + '$ErrorActionPreference = "SilentlyContinue";'
         + '$installed = $null;'
-        + 'foreach ($p in @("HKLM:\\SOFTWARE\\GLPI-Agent","HKLM:\\SOFTWARE\\WOW6432Node\\GLPI-Agent")) {'
+        + 'foreach ($p in @('
+        + '  "HKLM:\\SOFTWARE\\GLPI-Agent\\Installer",'
+        + '  "HKLM:\\SOFTWARE\\WOW6432Node\\GLPI-Agent\\Installer",'
+        + '  "HKLM:\\SOFTWARE\\GLPI-Agent",'
+        + '  "HKLM:\\SOFTWARE\\WOW6432Node\\GLPI-Agent"'
+        + ')) {'
         + '  if (Test-Path $p) {'
         + '    $v = (Get-ItemProperty -Path $p).Version;'
         + '    if ($v) { $installed = $v; break }'
+        + '  }'
+        + '}'
+        + 'if (-not $installed) {'
+        + '  foreach ($u in @("HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall","HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall")) {'
+        + '    $hit = Get-ChildItem $u -ErrorAction SilentlyContinue | Get-ItemProperty | Where-Object { $_.DisplayName -like "*GLPI*Agent*" } | Select-Object -First 1;'
+        + '    if ($hit -and $hit.DisplayVersion) { $installed = $hit.DisplayVersion; break }'
         + '  }'
         + '}'
         + 'Write-Host ("INSTALLED:" + $installed);';
