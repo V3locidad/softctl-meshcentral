@@ -785,10 +785,13 @@
     var bg = showModal([
       '<h3>🛰 Déploiement GLPI Agent <span class="pill">' + nodeIds.length + ' poste(s)</span></h3>',
       '<div style="font-size:12px;color:#666;margin:0 0 8px 0">',
-      '  Installe GLPI-Agent.msi silencieusement avec SERVER + TAG + RUNNOW=1.',
-      '  Skip si déjà installé (déclenche juste un nouvel inventaire <i>--force</i>).',
-      '  Le MSI doit être déposé dans <code>plugins/softctl/bin/GLPI-Agent*.msi</code>.',
+      '  Le serveur sélectionne automatiquement le MSI le plus récent de <code>plugins/softctl/bin/GLPI-Agent*.msi</code>.',
+      '  Pour chaque poste : si non installé → install ; si version < cible → MAJ ; sinon → skip + inventaire <i>--force</i>.',
       '</div>',
+      '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#444;margin-bottom:8px;cursor:pointer">',
+      '  <input type="checkbox" id="glpiForce">',
+      '  <span><b>Forcer la (ré)installation/MAJ</b> — ignore le check de version, relance msiexec même si déjà à jour</span>',
+      '</label>',
       '<div id="glpiBody" style="max-height:50vh;overflow:auto;border:1px solid #eee;border-radius:4px;padding:8px">Prêt à déployer.</div>',
       '<div class="actions">',
       '  <button id="glpiClose">Fermer</button>',
@@ -797,9 +800,10 @@
     ].join(''));
     bg.querySelector('#glpiClose').onclick = function () { closeModal(bg); };
     bg.querySelector('#glpiGo').onclick = function () {
+      var force = bg.querySelector('#glpiForce').checked;
       bg.querySelector('#glpiGo').disabled = true;
       bg.querySelector('#glpiBody').innerHTML = '<div style="color:#666">Dispatch en cours…</div>';
-      api('glpiAgentDeploy', null, { nodes: nodeIds })
+      api('glpiAgentDeploy', null, { nodes: nodeIds, force: force })
         .then(function (r) {
           if (r.error) { bg.querySelector('#glpiBody').innerHTML = '<div style="color:#721c24">⚠ ' + escapeHtml(r.error) + '</div>'; return; }
           pollGlpiRun(r.runId, r.dispatched, r.offline, bg);
@@ -823,16 +827,29 @@
           else if (r.status === 'offline') st = '<span style="background:#e2e3e5;color:#383d41;padding:1px 6px;border-radius:3px;font-size:11px">offline</span>';
           else if (r.status === 'aborted') st = '<span style="background:#f8d7da;color:#721c24;padding:1px 6px;border-radius:3px;font-size:11px" title="' + escapeHtml(r.error || '') + '">abandonné</span>';
           else                              st = '<span style="background:#f8d7da;color:#721c24;padding:1px 6px;border-radius:3px;font-size:11px" title="' + escapeHtml(r.error || '') + '">erreur</span>';
+          var instV = r.installedVersion || '';
+          var desV = r.desiredVersion || '';
           return '<tr>'
             + '<td style="padding:3px 6px">' + escapeHtml(a.name || nid.slice(0, 12)) + '</td>'
             + '<td style="padding:3px 6px">' + st + '</td>'
+            + '<td style="padding:3px 6px;font-family:Menlo,Consolas,monospace;font-size:11px">' + (instV ? escapeHtml(instV) : '—') + '</td>'
+            + '<td style="padding:3px 6px;font-family:Menlo,Consolas,monospace;font-size:11px">' + (desV ? escapeHtml(desV) : '—') + '</td>'
             + '<td style="padding:3px 6px;font-size:11px;color:#666">' + escapeHtml(r.error || '') + '</td>'
             + '</tr>';
         }).join('');
         bg.querySelector('#glpiBody').innerHTML =
-          '<div style="font-size:11px;color:#888;margin-bottom:6px">Run ' + runId + ' · ' + dispatched + ' dispatché(s) · ' + offline + ' offline</div>'
+          '<div style="font-size:11px;color:#888;margin-bottom:6px">Run ' + runId
+          + (run.desiredVersion ? ' · MSI cible <b>' + escapeHtml(run.desiredVersion) + '</b>' : '')
+          + (run.force ? ' · <span style="color:#c9302c">forcé</span>' : '')
+          + ' · ' + dispatched + ' dispatché(s) · ' + offline + ' offline</div>'
           + '<table style="width:100%;border-collapse:collapse;font-size:12px">'
-          + '<thead><tr style="background:#f4f4f4;text-align:left"><th style="padding:5px">Poste</th><th style="padding:5px">Statut</th><th style="padding:5px">Détail</th></tr></thead>'
+          + '<thead><tr style="background:#f4f4f4;text-align:left">'
+          + '<th style="padding:5px">Poste</th>'
+          + '<th style="padding:5px">Statut</th>'
+          + '<th style="padding:5px">Avant</th>'
+          + '<th style="padding:5px">Cible</th>'
+          + '<th style="padding:5px">Détail</th>'
+          + '</tr></thead>'
           + '<tbody>' + rows + '</tbody></table>';
         var pending = Object.values(run.results).some(function (r) { return r.status === 'running'; });
         if (pending) setTimeout(function () { pollGlpiRun(runId, dispatched, offline, bg); }, 4000);

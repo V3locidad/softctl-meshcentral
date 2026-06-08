@@ -83,6 +83,35 @@ module.exports.softctl = function (parent) {
     obj.meshServer = parent.parent;
     obj.exports = [];
 
+    // Cherche le MSI GLPI Agent le plus récent dans bin/ et extrait sa version
+    // depuis le nom de fichier (ex: "GLPI-Agent-1.13-x64.msi" → "1.13").
+    function findNewestGlpiAgentMsi() {
+        const binDir = path.join(__dirname, 'bin');
+        let candidates = [];
+        try {
+            fs.readdirSync(binDir).forEach((f) => {
+                if (!/^GLPI-Agent.*\.msi$/i.test(f)) return;
+                const m = f.match(/GLPI-Agent[-_]?(\d+(?:\.\d+)+)/i);
+                candidates.push({ path: path.join(binDir, f), version: m ? m[1] : '' });
+            });
+        } catch (_) {}
+        if (!candidates.length) return null;
+        // Tri par version desc (les versions non parseables passent en dernier)
+        candidates.sort((a, b) => {
+            if (!a.version) return 1;
+            if (!b.version) return -1;
+            const pa = a.version.split('.').map((n) => parseInt(n, 10) || 0);
+            const pb = b.version.split('.').map((n) => parseInt(n, 10) || 0);
+            const len = Math.max(pa.length, pb.length);
+            for (let i = 0; i < len; i++) {
+                const da = pa[i] || 0, db = pb[i] || 0;
+                if (da !== db) return db - da;
+            }
+            return 0;
+        });
+        return candidates[0];
+    }
+
     function loadCfg() {
         const p = path.join(__dirname, 'softctl-config.json');
         try { return JSON.parse(fs.readFileSync(p, 'utf8')); }
@@ -367,6 +396,8 @@ module.exports.softctl = function (parent) {
                     ok: !!command.ok,
                     result: command.result || '',
                     exitCode: command.exitCode,
+                    installedVersion: command.installedVersion || '',
+                    desiredVersion: command.desiredVersion || '',
                     error: command.error || undefined,
                     logTail: command.logTail || '',
                     time: Date.now(),
@@ -446,21 +477,16 @@ module.exports.softctl = function (parent) {
                 if (!entry || entry.kind !== 'glpiagent') {
                     return res.status(403).set('Content-Type', 'text/plain').send('forbidden');
                 }
-                const binDir = path.join(__dirname, 'bin');
-                let msiFile = null;
-                try {
-                    const found = fs.readdirSync(binDir).filter((f) => /^GLPI-Agent.*\.msi$/i.test(f));
-                    if (found.length) msiFile = path.join(binDir, found[0]);
-                } catch (_) {}
-                if (!msiFile || !fs.existsSync(msiFile)) {
-                    console.log('softctl: GLPI-Agent MSI absent dans ' + binDir);
+                const msi = findNewestGlpiAgentMsi();
+                if (!msi) {
+                    console.log('softctl: GLPI-Agent MSI absent dans ' + path.join(__dirname, 'bin'));
                     return res.status(404).set('Content-Type', 'text/plain').send('GLPI-Agent*.msi non déployé sur le serveur (placer dans plugins/softctl/bin/)');
                 }
-                const stat = fs.statSync(msiFile);
+                const stat = fs.statSync(msi.path);
                 res.set('Content-Type', 'application/octet-stream');
                 res.set('Content-Length', stat.size);
-                res.set('Content-Disposition', 'attachment; filename="' + path.basename(msiFile) + '"');
-                fs.createReadStream(msiFile).pipe(res);
+                res.set('Content-Disposition', 'attachment; filename="' + path.basename(msi.path) + '"');
+                fs.createReadStream(msi.path).pipe(res);
             } catch (e) { res.status(500).send(e.message); }
         });
 
@@ -601,16 +627,14 @@ module.exports.softctl = function (parent) {
             const body = readJsonParam(req);
             const nodes = Array.isArray(body.nodes) ? body.nodes.filter((n) => typeof n === 'string') : [];
             const tag = body.tag || cfg.glpi.tag || '';
+            const force = !!body.force;
             const glpiServer = String(cfg.glpi.url).replace(/\/+$/, '');
             if (!nodes.length) return sendJson(res, 400, { error: 'aucun poste sélectionné' });
-            const binDir = path.join(__dirname, 'bin');
-            let msiPresent = false;
-            try {
-                msiPresent = fs.readdirSync(binDir).some((f) => /^GLPI-Agent.*\.msi$/i.test(f));
-            } catch (_) {}
-            if (!msiPresent) {
-                return sendJson(res, 400, { error: 'GLPI-Agent*.msi non déployé. Télécharger depuis https://github.com/glpi-project/glpi-agent/releases et placer dans ' + binDir });
+            const msi = findNewestGlpiAgentMsi();
+            if (!msi) {
+                return sendJson(res, 400, { error: 'GLPI-Agent*.msi non déployé. Télécharger depuis https://github.com/glpi-project/glpi-agent/releases et placer dans ' + path.join(__dirname, 'bin') });
             }
+            const desiredVersion = msi.version || '';
             const wsagents = (obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents) || {};
             const runId = crypto.randomBytes(8).toString('hex');
             const run = {
@@ -620,6 +644,9 @@ module.exports.softctl = function (parent) {
                 user: (user && (user.name || user._id)) || 'unknown',
                 glpiServer: glpiServer,
                 tag: tag,
+                desiredVersion: desiredVersion,
+                msiName: path.basename(msi.path),
+                force: force,
                 results: {},
             };
             glpiAgentRuns[runId] = run;
@@ -644,6 +671,8 @@ module.exports.softctl = function (parent) {
                         msiUrl: msiUrl,
                         glpiServer: glpiServer,
                         tag: tag,
+                        desiredVersion: desiredVersion,
+                        force: force,
                     }));
                     run.results[nid] = { status: 'running', time: Date.now() };
                     dispatched++;

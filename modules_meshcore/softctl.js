@@ -70,9 +70,11 @@ function consoleaction(args, rights, sessionid, parent) {
 // doute sur la résolution de require('softctl').consoleaction.
 module.exports = { consoleaction: consoleaction };
 
-// Déploiement silencieux de GLPI Agent (MSI). Pas un soft du catalogue :
-// flow dédié parce qu'il faut passer SERVER/TAG/RUNNOW au msiexec et
-// détecter une install existante pour juste déclencher un inventaire.
+// Déploiement silencieux de GLPI Agent (MSI). Flow :
+// 1. Lit la version installée (registre)
+// 2. Compare à la version cible (envoyée par le serveur depuis le nom du MSI)
+// 3. Décide : install fresh, upgrade, skip+inventory, ou skip si déjà à jour
+// 4. Si force=true → MSI quoi qu'il arrive
 function doGlpiAgentInstall(data) {
     if (process.platform !== 'win32') {
         reply({ pluginaction: 'glpiAgentResult', dispatchId: data.dispatchId, ok: false, error: 'Windows only' });
@@ -84,98 +86,163 @@ function doGlpiAgentInstall(data) {
     var msiUrl = data.msiUrl || '';
     var server = data.glpiServer || '';
     var tag = data.tag || '';
+    var desiredVersion = data.desiredVersion || '';
+    var force = !!data.force;
     var log = [];
     function L(m) { log.push(m); dbg(m); }
-    function done(ok, result, exitCode, err) {
+    function done(ok, result, exitCode, installedVersion, err) {
         reply({
             pluginaction: 'glpiAgentResult',
             dispatchId: dispatchId,
             ok: !!ok,
             result: result || (ok ? 'ok' : 'fail'),
             exitCode: (typeof exitCode === 'number') ? exitCode : -1,
+            installedVersion: installedVersion || '',
+            desiredVersion: desiredVersion,
             error: err ? String(err) : undefined,
-            logTail: log.slice(-30).join('\n'),
+            logTail: log.slice(-40).join('\n'),
         });
     }
-    if (!msiUrl || !server) return done(false, 'missing_params', -1, 'msiUrl et glpiServer requis');
+    if (!msiUrl || !server) return done(false, 'missing_params', -1, '', 'msiUrl et glpiServer requis');
 
     var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
-    var pf = process.env.ProgramFiles || 'C:\\Program Files';
-
-    // Skip réinstall : si GLPI Agent déjà présent, déclenche juste un nouvel inventaire.
-    var agentDir = pf + '\\GLPI-Agent';
-    var agentBat1 = agentDir + '\\perl\\bin\\glpi-agent.bat';
-    var agentBat2 = agentDir + '\\glpi-agent.bat';
-    var existing = '';
-    try {
-        if (fs.existsSync(agentBat1)) existing = agentBat1;
-        else if (fs.existsSync(agentBat2)) existing = agentBat2;
-    } catch (e) {}
-    if (existing) {
-        L('GLPI Agent déjà installé : ' + existing + ' → déclenche inventaire');
-        try {
-            var child = cp.execFile(windir + '\\System32\\cmd.exe', ['/c', '"' + existing + '" --force']);
-            var ended = false;
-            function endIt(code) {
-                if (ended) return; ended = true;
-                L('glpi-agent --force exit ' + code);
-                done(code === 0, 'already_installed_inventory_triggered', code || 0);
-            }
-            if (child.stdout) child.stdout.on('data', function (d) { L('OUT: ' + d.toString().slice(0, 200)); });
-            if (child.stderr) child.stderr.on('data', function (d) { L('ERR: ' + d.toString().slice(0, 200)); });
-            child.on('exit', endIt);
-            setTimeout(function () { if (!ended) { try { child.kill(); } catch (_) {} endIt(-1); } }, 5 * 60 * 1000);
-        } catch (e) { done(false, 'inventory_trigger_failed', -1, e); }
-        return;
-    }
-
     var tmpRoot = (process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp');
     var msiPath = tmpRoot + '\\softctl_glpi_agent.msi';
-    try { if (fs.existsSync(msiPath)) fs.unlinkSync(msiPath); } catch (e) {}
 
-    L('download MSI : ' + msiUrl);
-    download(msiUrl, msiPath, function (err) {
-        if (err) { L('download err: ' + err); return done(false, 'download_failed', -1, err); }
+    function runPs(script, timeoutMs, cb) {
+        var ps1 = tmpRoot + '\\softctl_glpi_' + Date.now() + '.ps1';
+        try { fs.writeFileSync(ps1, script); }
+        catch (e) { return cb(-1, '', 'write ps1: ' + e); }
+        var psExe = windir + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+        var ended = false;
+        var out = '';
+        var child;
         try {
-            var st = fs.statSync(msiPath);
-            L('MSI ok, ' + st.size + ' bytes');
-            if (!st.size) return done(false, 'msi_empty', -1, 'MSI vide');
-        } catch (e) { return done(false, 'msi_stat_failed', -1, e); }
-
-        // Construit les args msiexec
-        var args = ['/i', msiPath, '/qn', '/norestart',
-            'SERVER=' + server,
-            'RUNNOW=1',
-            'ADDLOCAL=feat_INVENTORY,feat_NETWORK_INVENTORY,feat_REMOTEINVENTORY,feat_DEPLOY,feat_COLLECT,feat_ESX,feat_WAKEONLAN'];
-        if (tag) args.push('TAG=' + tag);
-        L('msiexec ' + args.join(' '));
-
-        try {
-            var msi = cp.execFile(windir + '\\System32\\msiexec.exe', args);
-            var done2 = false;
-            function finishMsi(code) {
-                if (done2) return; done2 = true;
-                try { fs.unlinkSync(msiPath); } catch (_) {}
-                L('msiexec exit ' + code);
-                var result = (code === 0) ? 'installed'
-                           : (code === 3010) ? 'installed_reboot_required'
-                           : 'msiexec_failed_' + code;
-                var ok = (code === 0 || code === 3010);
-                done(ok, result, code, ok ? undefined : ('msiexec exit ' + code));
-            }
-            if (msi.stdout) msi.stdout.on('data', function (d) { L('OUT: ' + d.toString().slice(0, 200)); });
-            if (msi.stderr) msi.stderr.on('data', function (d) { L('ERR: ' + d.toString().slice(0, 200)); });
-            msi.on('exit', finishMsi);
-            setTimeout(function () {
-                if (done2) return;
-                try { msi.kill(); } catch (_) {}
-                finishMsi(-2); // timeout
-            }, 10 * 60 * 1000);
+            child = cp.execFile(psExe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-File', ps1]);
         } catch (e) {
-            try { fs.unlinkSync(msiPath); } catch (_) {}
-            done(false, 'msiexec_spawn_failed', -1, e);
+            try { fs.unlinkSync(ps1); } catch (_) {}
+            return cb(-1, '', 'spawn ps: ' + e);
         }
+        if (child.stdout) child.stdout.on('data', function (d) { out += d.toString(); });
+        if (child.stderr) child.stderr.on('data', function (d) { out += d.toString(); });
+        child.on('exit', function (code) {
+            if (ended) return; ended = true;
+            try { fs.unlinkSync(ps1); } catch (_) {}
+            cb(code, out, null);
+        });
+        setTimeout(function () {
+            if (ended) return; ended = true;
+            try { child.kill(); } catch (_) {}
+            try { fs.unlinkSync(ps1); } catch (_) {}
+            cb(-2, out, 'timeout');
+        }, timeoutMs);
+    }
+
+    // Étape 1 : détecte la version installée (sans rien télécharger)
+    var detectPs = ''
+        + '$ErrorActionPreference = "SilentlyContinue";'
+        + '$installed = $null;'
+        + 'foreach ($p in @("HKLM:\\SOFTWARE\\GLPI-Agent","HKLM:\\SOFTWARE\\WOW6432Node\\GLPI-Agent")) {'
+        + '  if (Test-Path $p) {'
+        + '    $v = (Get-ItemProperty -Path $p).Version;'
+        + '    if ($v) { $installed = $v; break }'
+        + '  }'
+        + '}'
+        + 'Write-Host ("INSTALLED:" + $installed);';
+
+    runPs(detectPs, 30 * 1000, function (code, out, err) {
+        if (err) { L('detect err: ' + err); return done(false, 'detect_failed', -1, '', err); }
+        var mInst = (out || '').match(/INSTALLED:([^\r\n]*)/);
+        var installedVersion = (mInst && mInst[1] && mInst[1] !== '') ? mInst[1].trim() : '';
+        L('installed version: ' + (installedVersion || '(none)') + ' / desired: ' + (desiredVersion || '(any)'));
+
+        // Étape 2 : décide quoi faire
+        var action = ''; var reason = '';
+        if (!installedVersion) { action = 'install'; reason = 'not_installed'; }
+        else if (force)        { action = 'install'; reason = 'forced_reinstall'; }
+        else if (desiredVersion) {
+            var cmp = compareVersions(installedVersion, desiredVersion);
+            if (cmp < 0)       { action = 'install'; reason = 'upgrade_' + installedVersion + '_to_' + desiredVersion; }
+            else if (cmp === 0){ action = 'inventory'; reason = 'already_current_' + installedVersion; }
+            else               { action = 'inventory'; reason = 'installed_newer_' + installedVersion; }
+        } else                 { action = 'inventory'; reason = 'already_installed_' + installedVersion; }
+        L('decision: ' + action + ' (' + reason + ')');
+
+        if (action === 'inventory') {
+            // Skip MSI, lance juste un inventaire
+            var pf = process.env.ProgramFiles || 'C:\\Program Files';
+            var exe1 = pf + '\\GLPI-Agent\\perl\\bin\\glpi-agent.bat';
+            var exe2 = pf + '\\GLPI-Agent\\glpi-agent.bat';
+            var exe = fs.existsSync(exe1) ? exe1 : (fs.existsSync(exe2) ? exe2 : '');
+            if (!exe) return done(true, 'skip_no_exe_found', 0, installedVersion);
+            var invPs = '& cmd.exe /c \'"' + exe.replace(/'/g, "''") + '" --force\' | Out-String | Write-Host;';
+            runPs(invPs, 5 * 60 * 1000, function (icode, iout, ierr) {
+                L('inventory: ' + (iout || '').slice(0, 300));
+                done(icode === 0, reason, icode, installedVersion, ierr || undefined);
+            });
+            return;
+        }
+
+        // action === 'install' : télécharge le MSI puis lance msiexec
+        try { if (fs.existsSync(msiPath)) fs.unlinkSync(msiPath); } catch (e) {}
+        L('download MSI : ' + msiUrl);
+        download(msiUrl, msiPath, function (derr) {
+            if (derr) { L('download err: ' + derr); return done(false, 'download_failed', -1, installedVersion, derr); }
+            try {
+                var st = fs.statSync(msiPath);
+                L('MSI ok, ' + st.size + ' bytes');
+                if (!st.size) return done(false, 'msi_empty', -1, installedVersion, 'MSI vide');
+            } catch (e) { return done(false, 'msi_stat_failed', -1, installedVersion, e); }
+
+            var args = ['/i', msiPath, '/qn', '/norestart',
+                'SERVER=' + server,
+                'RUNNOW=1',
+                'REINSTALL=ALL', 'REINSTALLMODE=vomus',  // upgrade-friendly
+                'ADDLOCAL=feat_INVENTORY,feat_NETWORK_INVENTORY,feat_REMOTEINVENTORY,feat_DEPLOY,feat_COLLECT,feat_ESX,feat_WAKEONLAN'];
+            if (tag) args.push('TAG=' + tag);
+            // En install fresh, REINSTALL=ALL provoque erreur ; on l'enlève si pas installé
+            if (!installedVersion) {
+                args = args.filter(function (a) { return a !== 'REINSTALL=ALL' && a !== 'REINSTALLMODE=vomus'; });
+            }
+            L('msiexec ' + args.join(' '));
+
+            try {
+                var msi = cp.execFile(windir + '\\System32\\msiexec.exe', args);
+                var done2 = false;
+                function finishMsi(mcode) {
+                    if (done2) return; done2 = true;
+                    try { fs.unlinkSync(msiPath); } catch (_) {}
+                    L('msiexec exit ' + mcode);
+                    var resStr = (mcode === 0) ? ('installed_' + (desiredVersion || 'msi'))
+                               : (mcode === 3010) ? 'installed_reboot_required'
+                               : 'msiexec_failed_' + mcode;
+                    var ok = (mcode === 0 || mcode === 3010);
+                    done(ok, resStr, mcode, installedVersion, ok ? undefined : ('msiexec exit ' + mcode));
+                }
+                if (msi.stdout) msi.stdout.on('data', function (d) { L('OUT: ' + d.toString().slice(0, 200)); });
+                if (msi.stderr) msi.stderr.on('data', function (d) { L('ERR: ' + d.toString().slice(0, 200)); });
+                msi.on('exit', finishMsi);
+                setTimeout(function () { if (!done2) { try { msi.kill(); } catch (_) {} finishMsi(-2); } }, 10 * 60 * 1000);
+            } catch (e) {
+                try { fs.unlinkSync(msiPath); } catch (_) {}
+                done(false, 'msiexec_spawn_failed', -1, installedVersion, e);
+            }
+        });
     });
+}
+
+// Compare versions sémantiques "1.10.5" vs "1.13" → renvoie < 0, 0, > 0.
+function compareVersions(a, b) {
+    if (!a) return -1;
+    if (!b) return 1;
+    var pa = String(a).split(/[.\-_]/).map(function (n) { return parseInt(n, 10) || 0; });
+    var pb = String(b).split(/[.\-_]/).map(function (n) { return parseInt(n, 10) || 0; });
+    var len = Math.max(pa.length, pb.length);
+    for (var i = 0; i < len; i++) {
+        var da = pa[i] || 0, db = pb[i] || 0;
+        if (da !== db) return da - db;
+    }
+    return 0;
 }
 
 function doInstall(data) {
