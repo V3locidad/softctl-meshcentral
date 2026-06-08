@@ -208,7 +208,11 @@ function doGlpiAgentInstall(data) {
                 if (!st.size) return done(false, 'msi_empty', -1, installedVersion, 'MSI vide');
             } catch (e) { return done(false, 'msi_stat_failed', -1, installedVersion, e); }
 
+            var msiLog = tmpRoot + '\\softctl_glpi_msi.log';
+            try { if (fs.existsSync(msiLog)) fs.unlinkSync(msiLog); } catch (_) {}
+
             var args = ['/i', msiPath, '/qn', '/norestart',
+                '/L*v', msiLog,
                 'SERVER=' + server,
                 'RUNNOW=1',
                 'REINSTALL=ALL', 'REINSTALLMODE=vomus',
@@ -220,13 +224,30 @@ function doGlpiAgentInstall(data) {
             }
             L('msiexec ' + args.join(' '));
 
-            // IMPORTANT : cp.execFile('msiexec.exe', ...) ne reçoit jamais
-            // l'event 'exit' dans Duktape (msiexec ne ferme pas stdio proprement,
-            // même bug que DelProf2). On enrobe dans PowerShell Start-Process
-            // -Wait -PassThru qui retourne proprement avec l'ExitCode.
+            // 1603 = file in use → le service GLPI-Agent en cours d'exécution
+            // tient les fichiers. On stoppe le service avant l'install, et on
+            // gère l'éventuelle uninstall préalable d'une vieille version
+            // (1.6.x ne supporte pas toujours l'upgrade in-place via UpgradeCode).
+            // Logging verbose MSI activé pour diagnostiquer si rebelote.
             var argsLit = args.map(function (a) { return "'" + a.replace(/'/g, "''") + "'"; }).join(',');
             var msiPs = ''
-                + '$ErrorActionPreference = "Stop";'
+                + '$ErrorActionPreference = "Continue";'
+                // Stoppe tout service GLPI-Agent existant et processus glpi-agent
+                + 'foreach ($svc in @("GLPI-Agent","glpi-agent","glpi-agent-monitor")) {'
+                + '  try {'
+                + '    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue;'
+                + '    if ($s -and $s.Status -ne "Stopped") {'
+                + '      Write-Host ("STOP_SVC:" + $svc);'
+                + '      Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue;'
+                + '    }'
+                + '  } catch {}'
+                + '}'
+                + 'Get-Process -Name "glpi-agent*","perl" -ErrorAction SilentlyContinue | ForEach-Object {'
+                + '  Write-Host ("KILL_PROC:" + $_.Name);'
+                + '  try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}'
+                + '}'
+                + 'Start-Sleep -Seconds 3;'
+                // Lance msiexec
                 + 'try {'
                 + '  $p = Start-Process -FilePath "msiexec.exe" -ArgumentList @(' + argsLit + ')'
                 + '    -Wait -PassThru -WindowStyle Hidden;'
@@ -240,7 +261,19 @@ function doGlpiAgentInstall(data) {
                 if (perr) { L('msi ps err: ' + perr); return done(false, 'msiexec_wrapper_failed', -1, installedVersion, perr); }
                 var exitM = (out || '').match(/MSI_EXIT:(-?\d+)/);
                 var mcode = exitM ? parseInt(exitM[1], 10) : pcode;
-                L('msiexec exit ' + mcode + ' (raw out: ' + (out || '').slice(0, 300) + ')');
+                L('msiexec exit ' + mcode + ' (raw out: ' + (out || '').slice(0, 500) + ')');
+                if (mcode !== 0 && mcode !== 3010) {
+                    // Capture les dernières lignes du log MSI pour diagnostiquer
+                    try {
+                        var raw = fs.readFileSync(msiLog).toString();
+                        // Cherche les lignes d'erreur typiques (CustomAction, Error, return value 3)
+                        var errLines = raw.split(/\r?\n/).filter(function (line) {
+                            return /error|return value 3|MainEngineThread|CustomAction.*returned actual error/i.test(line);
+                        }).slice(-10);
+                        L('MSI log tail:\n' + errLines.join('\n'));
+                    } catch (e) { L('msi log read err: ' + e); }
+                }
+                try { fs.unlinkSync(msiLog); } catch (_) {}
                 var resStr = (mcode === 0) ? ('installed_' + (desiredVersion || 'msi'))
                            : (mcode === 3010) ? 'installed_reboot_required'
                            : 'msiexec_failed_' + mcode;
