@@ -52,6 +52,9 @@ function consoleaction(args, rights, sessionid, parent) {
             case 'wingetCheck':
                 doWingetCheck(args);
                 return 'check started';
+            case 'glpiAgentInstall':
+                doGlpiAgentInstall(args);
+                return 'glpiAgentInstall started';
             default:
                 return 'softctl: action inconnue ' + fnname;
         }
@@ -66,6 +69,114 @@ function consoleaction(args, rights, sessionid, parent) {
 // ScriptTask s'en passe (les noms top-level passent), mais on évite tout
 // doute sur la résolution de require('softctl').consoleaction.
 module.exports = { consoleaction: consoleaction };
+
+// Déploiement silencieux de GLPI Agent (MSI). Pas un soft du catalogue :
+// flow dédié parce qu'il faut passer SERVER/TAG/RUNNOW au msiexec et
+// détecter une install existante pour juste déclencher un inventaire.
+function doGlpiAgentInstall(data) {
+    if (process.platform !== 'win32') {
+        reply({ pluginaction: 'glpiAgentResult', dispatchId: data.dispatchId, ok: false, error: 'Windows only' });
+        return;
+    }
+    var fs = require('fs');
+    var cp = require('child_process');
+    var dispatchId = data.dispatchId;
+    var msiUrl = data.msiUrl || '';
+    var server = data.glpiServer || '';
+    var tag = data.tag || '';
+    var log = [];
+    function L(m) { log.push(m); dbg(m); }
+    function done(ok, result, exitCode, err) {
+        reply({
+            pluginaction: 'glpiAgentResult',
+            dispatchId: dispatchId,
+            ok: !!ok,
+            result: result || (ok ? 'ok' : 'fail'),
+            exitCode: (typeof exitCode === 'number') ? exitCode : -1,
+            error: err ? String(err) : undefined,
+            logTail: log.slice(-30).join('\n'),
+        });
+    }
+    if (!msiUrl || !server) return done(false, 'missing_params', -1, 'msiUrl et glpiServer requis');
+
+    var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
+    var pf = process.env.ProgramFiles || 'C:\\Program Files';
+
+    // Skip réinstall : si GLPI Agent déjà présent, déclenche juste un nouvel inventaire.
+    var agentDir = pf + '\\GLPI-Agent';
+    var agentBat1 = agentDir + '\\perl\\bin\\glpi-agent.bat';
+    var agentBat2 = agentDir + '\\glpi-agent.bat';
+    var existing = '';
+    try {
+        if (fs.existsSync(agentBat1)) existing = agentBat1;
+        else if (fs.existsSync(agentBat2)) existing = agentBat2;
+    } catch (e) {}
+    if (existing) {
+        L('GLPI Agent déjà installé : ' + existing + ' → déclenche inventaire');
+        try {
+            var child = cp.execFile(windir + '\\System32\\cmd.exe', ['/c', '"' + existing + '" --force']);
+            var ended = false;
+            function endIt(code) {
+                if (ended) return; ended = true;
+                L('glpi-agent --force exit ' + code);
+                done(code === 0, 'already_installed_inventory_triggered', code || 0);
+            }
+            if (child.stdout) child.stdout.on('data', function (d) { L('OUT: ' + d.toString().slice(0, 200)); });
+            if (child.stderr) child.stderr.on('data', function (d) { L('ERR: ' + d.toString().slice(0, 200)); });
+            child.on('exit', endIt);
+            setTimeout(function () { if (!ended) { try { child.kill(); } catch (_) {} endIt(-1); } }, 5 * 60 * 1000);
+        } catch (e) { done(false, 'inventory_trigger_failed', -1, e); }
+        return;
+    }
+
+    var tmpRoot = (process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp');
+    var msiPath = tmpRoot + '\\softctl_glpi_agent.msi';
+    try { if (fs.existsSync(msiPath)) fs.unlinkSync(msiPath); } catch (e) {}
+
+    L('download MSI : ' + msiUrl);
+    download(msiUrl, msiPath, function (err) {
+        if (err) { L('download err: ' + err); return done(false, 'download_failed', -1, err); }
+        try {
+            var st = fs.statSync(msiPath);
+            L('MSI ok, ' + st.size + ' bytes');
+            if (!st.size) return done(false, 'msi_empty', -1, 'MSI vide');
+        } catch (e) { return done(false, 'msi_stat_failed', -1, e); }
+
+        // Construit les args msiexec
+        var args = ['/i', msiPath, '/qn', '/norestart',
+            'SERVER=' + server,
+            'RUNNOW=1',
+            'ADDLOCAL=feat_INVENTORY,feat_NETWORK_INVENTORY,feat_REMOTEINVENTORY,feat_DEPLOY,feat_COLLECT,feat_ESX,feat_WAKEONLAN'];
+        if (tag) args.push('TAG=' + tag);
+        L('msiexec ' + args.join(' '));
+
+        try {
+            var msi = cp.execFile(windir + '\\System32\\msiexec.exe', args);
+            var done2 = false;
+            function finishMsi(code) {
+                if (done2) return; done2 = true;
+                try { fs.unlinkSync(msiPath); } catch (_) {}
+                L('msiexec exit ' + code);
+                var result = (code === 0) ? 'installed'
+                           : (code === 3010) ? 'installed_reboot_required'
+                           : 'msiexec_failed_' + code;
+                var ok = (code === 0 || code === 3010);
+                done(ok, result, code, ok ? undefined : ('msiexec exit ' + code));
+            }
+            if (msi.stdout) msi.stdout.on('data', function (d) { L('OUT: ' + d.toString().slice(0, 200)); });
+            if (msi.stderr) msi.stderr.on('data', function (d) { L('ERR: ' + d.toString().slice(0, 200)); });
+            msi.on('exit', finishMsi);
+            setTimeout(function () {
+                if (done2) return;
+                try { msi.kill(); } catch (_) {}
+                finishMsi(-2); // timeout
+            }, 10 * 60 * 1000);
+        } catch (e) {
+            try { fs.unlinkSync(msiPath); } catch (_) {}
+            done(false, 'msiexec_spawn_failed', -1, e);
+        }
+    });
+}
 
 function doInstall(data) {
     var fs = require('fs');

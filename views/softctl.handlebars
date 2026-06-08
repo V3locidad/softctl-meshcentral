@@ -69,6 +69,7 @@
   <span style="flex:1"></span>
   <button id="invBtn" disabled title="Sélectionner exactement 1 poste">🔍 Inventaire poste</button>
   <button id="wingetBtn">📦 Winget</button>
+  <button id="glpiAgentBtn">🛰 GLPI Agent</button>
   <button id="historyBtn">Historique</button>
   <button id="refreshBtn" class="primary">Rafraîchir</button>
 </div>
@@ -777,6 +778,68 @@
     });
   }
   $('wingetBtn').onclick = openWinget;
+
+  function openGlpiAgent() {
+    var nodeIds = Object.keys(agentSel);
+    if (!nodeIds.length) { alert('Sélectionne d\'abord un ou plusieurs postes.'); return; }
+    var bg = showModal([
+      '<h3>🛰 Déploiement GLPI Agent <span class="pill">' + nodeIds.length + ' poste(s)</span></h3>',
+      '<div style="font-size:12px;color:#666;margin:0 0 8px 0">',
+      '  Installe GLPI-Agent.msi silencieusement avec SERVER + TAG + RUNNOW=1.',
+      '  Skip si déjà installé (déclenche juste un nouvel inventaire <i>--force</i>).',
+      '  Le MSI doit être déposé dans <code>plugins/softctl/bin/GLPI-Agent*.msi</code>.',
+      '</div>',
+      '<div id="glpiBody" style="max-height:50vh;overflow:auto;border:1px solid #eee;border-radius:4px;padding:8px">Prêt à déployer.</div>',
+      '<div class="actions">',
+      '  <button id="glpiClose">Fermer</button>',
+      '  <button id="glpiGo" class="primary">Déployer</button>',
+      '</div>',
+    ].join(''));
+    bg.querySelector('#glpiClose').onclick = function () { closeModal(bg); };
+    bg.querySelector('#glpiGo').onclick = function () {
+      bg.querySelector('#glpiGo').disabled = true;
+      bg.querySelector('#glpiBody').innerHTML = '<div style="color:#666">Dispatch en cours…</div>';
+      api('glpiAgentDeploy', null, { nodes: nodeIds })
+        .then(function (r) {
+          if (r.error) { bg.querySelector('#glpiBody').innerHTML = '<div style="color:#721c24">⚠ ' + escapeHtml(r.error) + '</div>'; return; }
+          pollGlpiRun(r.runId, r.dispatched, r.offline, bg);
+        })
+        .catch(function (e) {
+          bg.querySelector('#glpiBody').innerHTML = '<div style="color:#721c24">⚠ ' + escapeHtml(e.message) + '</div>';
+        });
+    };
+  }
+  function pollGlpiRun(runId, dispatched, offline, bg) {
+    api('glpiAgentStatus', { runId: runId })
+      .then(function (run) {
+        var byId = {};
+        agents.forEach(function (a) { byId[a.id] = a; });
+        var rows = Object.keys(run.results).map(function (nid) {
+          var r = run.results[nid];
+          var a = byId[nid] || {};
+          var st;
+          if (r.status === 'running')      st = '<span style="background:#fff3cd;padding:1px 6px;border-radius:3px;font-size:11px">en cours</span>';
+          else if (r.status === 'done')    st = '<span style="background:#d4edda;color:#155724;padding:1px 6px;border-radius:3px;font-size:11px">' + escapeHtml(r.result || 'OK') + '</span>';
+          else if (r.status === 'offline') st = '<span style="background:#e2e3e5;color:#383d41;padding:1px 6px;border-radius:3px;font-size:11px">offline</span>';
+          else if (r.status === 'aborted') st = '<span style="background:#f8d7da;color:#721c24;padding:1px 6px;border-radius:3px;font-size:11px" title="' + escapeHtml(r.error || '') + '">abandonné</span>';
+          else                              st = '<span style="background:#f8d7da;color:#721c24;padding:1px 6px;border-radius:3px;font-size:11px" title="' + escapeHtml(r.error || '') + '">erreur</span>';
+          return '<tr>'
+            + '<td style="padding:3px 6px">' + escapeHtml(a.name || nid.slice(0, 12)) + '</td>'
+            + '<td style="padding:3px 6px">' + st + '</td>'
+            + '<td style="padding:3px 6px;font-size:11px;color:#666">' + escapeHtml(r.error || '') + '</td>'
+            + '</tr>';
+        }).join('');
+        bg.querySelector('#glpiBody').innerHTML =
+          '<div style="font-size:11px;color:#888;margin-bottom:6px">Run ' + runId + ' · ' + dispatched + ' dispatché(s) · ' + offline + ' offline</div>'
+          + '<table style="width:100%;border-collapse:collapse;font-size:12px">'
+          + '<thead><tr style="background:#f4f4f4;text-align:left"><th style="padding:5px">Poste</th><th style="padding:5px">Statut</th><th style="padding:5px">Détail</th></tr></thead>'
+          + '<tbody>' + rows + '</tbody></table>';
+        var pending = Object.values(run.results).some(function (r) { return r.status === 'running'; });
+        if (pending) setTimeout(function () { pollGlpiRun(runId, dispatched, offline, bg); }, 4000);
+      })
+      .catch(function () { setTimeout(function () { pollGlpiRun(runId, dispatched, offline, bg); }, 6000); });
+  }
+  $('glpiAgentBtn').onclick = openGlpiAgent;
 
   function openInventory() {
     var nodeIds = Object.keys(agentSel);

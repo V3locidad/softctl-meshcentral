@@ -23,6 +23,9 @@ const inventoryWaiters = {};  // dispatchId -> { res, expires }
 const wingetStatusCache = {}; // nodeId -> { hasWinget, version, tooOld, lastCheck }
 const wingetCheckPending = {}; // dispatchId -> nodeId
 const wingetMaintenanceState = { lastFixDispatch: {}, autoEnabled: true, baseUrl: '' };
+const glpiAgentRuns = {};      // runId -> { results: { nodeId: {…} } }
+const glpiAgentPending = {};   // dispatchId -> { runId, nodeId }
+const GLPI_AGENT_RUN_TTL = 6 * 60 * 60 * 1000;
 const WINGET_STATUS_TTL = 30 * 60 * 1000;  // 30 min de fraîcheur
 const WINGET_FIX_COOLDOWN = 60 * 60 * 1000; // 1h entre 2 tentatives sur le même poste
 
@@ -59,9 +62,9 @@ function saveHistory() {
     } catch (e) {}
 }
 
-function newDownloadToken(slug) {
+function newDownloadToken(slug, kind) {
     const t = crypto.randomBytes(24).toString('hex');
-    downloadTokens[t] = { slug: slug, expires: Date.now() + TOKEN_TTL_MS };
+    downloadTokens[t] = { slug: slug, kind: kind || 'soft', expires: Date.now() + TOKEN_TTL_MS };
     return t;
 }
 
@@ -351,6 +354,26 @@ module.exports.softctl = function (parent) {
                 };
                 return;
             }
+            if (command.pluginaction === 'glpiAgentResult') {
+                const did = command.dispatchId;
+                if (!did) return;
+                const entry = glpiAgentPending[did];
+                if (!entry) return;
+                delete glpiAgentPending[did];
+                const run = glpiAgentRuns[entry.runId];
+                if (!run) return;
+                run.results[entry.nodeId] = {
+                    status: command.ok ? 'done' : 'error',
+                    ok: !!command.ok,
+                    result: command.result || '',
+                    exitCode: command.exitCode,
+                    error: command.error || undefined,
+                    logTail: command.logTail || '',
+                    time: Date.now(),
+                };
+                console.log('softctl: glpiAgentResult ' + entry.nodeId + ' = ' + (command.result || (command.ok ? 'ok' : 'err')));
+                return;
+            }
             if (command.pluginaction === 'wingetInventoryResult') {
                 const w = inventoryWaiters[command.dispatchId];
                 if (!w) return;
@@ -415,11 +438,37 @@ module.exports.softctl = function (parent) {
         // requête à pluginadmin.ashx sans cookie de session — donc l'agent
         // (PowerShell sans cookie) ne peut pas y accéder. Notre token au porteur
         // dans l'URL nous tient lieu d'auth.
+        // Endpoint dédié au MSI GLPI Agent (cherché dans bin/GLPI-Agent*.msi).
+        app.get('/softctl-download/glpiagent/:token', (req, res) => {
+            try {
+                const token = String(req.params.token || '');
+                const entry = consumeDownloadToken(token);
+                if (!entry || entry.kind !== 'glpiagent') {
+                    return res.status(403).set('Content-Type', 'text/plain').send('forbidden');
+                }
+                const binDir = path.join(__dirname, 'bin');
+                let msiFile = null;
+                try {
+                    const found = fs.readdirSync(binDir).filter((f) => /^GLPI-Agent.*\.msi$/i.test(f));
+                    if (found.length) msiFile = path.join(binDir, found[0]);
+                } catch (_) {}
+                if (!msiFile || !fs.existsSync(msiFile)) {
+                    console.log('softctl: GLPI-Agent MSI absent dans ' + binDir);
+                    return res.status(404).set('Content-Type', 'text/plain').send('GLPI-Agent*.msi non déployé sur le serveur (placer dans plugins/softctl/bin/)');
+                }
+                const stat = fs.statSync(msiFile);
+                res.set('Content-Type', 'application/octet-stream');
+                res.set('Content-Length', stat.size);
+                res.set('Content-Disposition', 'attachment; filename="' + path.basename(msiFile) + '"');
+                fs.createReadStream(msiFile).pipe(res);
+            } catch (e) { res.status(500).send(e.message); }
+        });
+
         app.get('/softctl-download/:token', (req, res) => {
             try {
                 const token = String(req.params.token || '');
                 const entry = consumeDownloadToken(token);
-                if (!entry) return res.status(403).set('Content-Type', 'text/plain').send('forbidden');
+                if (!entry || (entry.kind && entry.kind !== 'soft')) return res.status(403).set('Content-Type', 'text/plain').send('forbidden');
                 const cfg = loadCfg();
                 if (!cfg || !cfg.softwareDir) return res.status(500).send('softwareDir non défini');
                 const folder = path.join(cfg.softwareDir, entry.slug);
@@ -540,6 +589,86 @@ module.exports.softctl = function (parent) {
                 sendJson(res, 200, { agents: agents, meshes: meshes || [] });
             });
             return;
+        }
+
+        // ---- GLPI Agent deploy ----
+
+        if (action === 'glpiAgentDeploy') {
+            const cfg = loadCfg();
+            if (!cfg || !cfg.glpi || !cfg.glpi.url) {
+                return sendJson(res, 400, { error: 'GLPI non configuré dans softctl-config.json (clé glpi.url)' });
+            }
+            const body = readJsonParam(req);
+            const nodes = Array.isArray(body.nodes) ? body.nodes.filter((n) => typeof n === 'string') : [];
+            const tag = body.tag || cfg.glpi.tag || '';
+            const glpiServer = String(cfg.glpi.url).replace(/\/+$/, '');
+            if (!nodes.length) return sendJson(res, 400, { error: 'aucun poste sélectionné' });
+            const binDir = path.join(__dirname, 'bin');
+            let msiPresent = false;
+            try {
+                msiPresent = fs.readdirSync(binDir).some((f) => /^GLPI-Agent.*\.msi$/i.test(f));
+            } catch (_) {}
+            if (!msiPresent) {
+                return sendJson(res, 400, { error: 'GLPI-Agent*.msi non déployé. Télécharger depuis https://github.com/glpi-project/glpi-agent/releases et placer dans ' + binDir });
+            }
+            const wsagents = (obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents) || {};
+            const runId = crypto.randomBytes(8).toString('hex');
+            const run = {
+                id: runId,
+                kind: 'glpiAgent',
+                timestamp: Date.now(),
+                user: (user && (user.name || user._id)) || 'unknown',
+                glpiServer: glpiServer,
+                tag: tag,
+                results: {},
+            };
+            glpiAgentRuns[runId] = run;
+            let dispatched = 0, offline = 0;
+            const baseUrl = wingetMaintenanceState.baseUrl;
+            if (!baseUrl) return sendJson(res, 500, { error: 'baseUrl serveur inconnue, recharge la page' });
+            nodes.forEach((nid) => {
+                const ws = wsagents[nid];
+                if (!ws || typeof ws.send !== 'function') {
+                    run.results[nid] = { status: 'offline', time: Date.now() };
+                    offline++;
+                    return;
+                }
+                const did = crypto.randomBytes(16).toString('hex');
+                glpiAgentPending[did] = { runId: runId, nodeId: nid, expires: Date.now() + GLPI_AGENT_RUN_TTL };
+                const token = newDownloadToken('glpi-agent', 'glpiagent');
+                const msiUrl = baseUrl + '/softctl-download/glpiagent/' + token;
+                try {
+                    ws.send(JSON.stringify({
+                        action: 'plugin', plugin: 'softctl', pluginaction: 'glpiAgentInstall',
+                        dispatchId: did,
+                        msiUrl: msiUrl,
+                        glpiServer: glpiServer,
+                        tag: tag,
+                    }));
+                    run.results[nid] = { status: 'running', time: Date.now() };
+                    dispatched++;
+                } catch (e) {
+                    run.results[nid] = { status: 'error', error: String(e), time: Date.now() };
+                }
+            });
+            return sendJson(res, 200, { runId: runId, dispatched: dispatched, offline: offline });
+        }
+
+        if (action === 'glpiAgentStatus') {
+            const id = String((req.query && req.query.runId) || '');
+            const run = glpiAgentRuns[id];
+            if (!run) return sendJson(res, 404, { error: 'run inconnu' });
+            // Watchdog : runs running depuis > 15 min sans heartbeat = abandonné
+            const STALE = 15 * 60 * 1000;
+            const now = Date.now();
+            Object.keys(run.results).forEach((nid) => {
+                const r = run.results[nid];
+                if (r.status === 'running' && (now - (r.time || run.timestamp)) > STALE) {
+                    r.status = 'aborted';
+                    r.error = 'poste injoignable (>15 min sans réponse)';
+                }
+            });
+            return sendJson(res, 200, run);
         }
 
         // ---- Phase 2: CRUD on the catalogue ----
