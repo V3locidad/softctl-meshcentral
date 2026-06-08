@@ -211,16 +211,21 @@ function doGlpiAgentInstall(data) {
             var msiLog = tmpRoot + '\\softctl_glpi_msi.log';
             try { if (fs.existsSync(msiLog)) fs.unlinkSync(msiLog); } catch (_) {}
 
+            // Deux modes d'install :
+            //  - Fresh (rien installé)  → ADDLOCAL=ALL : ajoute toutes les
+            //    features dispo dans ce MSI (noms varient entre versions :
+            //    feat_INVENTORY, feat_NETWORKINVENTORY, etc.).
+            //  - Upgrade (déjà installé) → pas d'ADDLOCAL, pas de REINSTALL.
+            //    Le MajorUpgrade WiX du MSI détecte l'ancienne version,
+            //    la désinstalle et installe la nouvelle automatiquement.
+            //    Les propriétés SERVER/TAG/RUNNOW sont reprises.
             var args = ['/i', msiPath, '/qn', '/norestart',
                 '/L*v', msiLog,
                 'SERVER=' + server,
-                'RUNNOW=1',
-                'REINSTALL=ALL', 'REINSTALLMODE=vomus',
-                'ADDLOCAL=feat_INVENTORY,feat_NETWORK_INVENTORY,feat_REMOTEINVENTORY,feat_DEPLOY,feat_COLLECT,feat_ESX,feat_WAKEONLAN'];
+                'RUNNOW=1'];
             if (tag) args.push('TAG=' + tag);
-            // En install fresh, REINSTALL=ALL erreur ; on l'enlève si pas installé
             if (!installedVersion) {
-                args = args.filter(function (a) { return a !== 'REINSTALL=ALL' && a !== 'REINSTALLMODE=vomus'; });
+                args.push('ADDLOCAL=ALL');
             }
             L('msiexec ' + args.join(' '));
 
