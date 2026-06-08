@@ -91,7 +91,7 @@ function doGlpiAgentInstall(data) {
     var log = [];
     function L(m) { log.push(m); dbg(m); }
     function done(ok, result, exitCode, installedVersion, err) {
-        reply({
+        var payload = {
             pluginaction: 'glpiAgentResult',
             dispatchId: dispatchId,
             ok: !!ok,
@@ -101,7 +101,15 @@ function doGlpiAgentInstall(data) {
             desiredVersion: desiredVersion,
             error: err ? String(err) : undefined,
             logTail: log.slice(-40).join('\n'),
-        });
+        };
+        // Retry pour survivre à une coupure WS / restart MC pendant l'install.
+        // Idempotent côté serveur (dispatchId fixe + check status === 'done').
+        var attempts = 0;
+        (function tick() {
+            reply(payload);
+            attempts++;
+            if (attempts < 20) setTimeout(tick, 30 * 1000); // 20 × 30s = 10 min
+        })();
     }
     if (!msiUrl || !server) return done(false, 'missing_params', -1, '', 'msiUrl et glpiServer requis');
 

@@ -46,7 +46,22 @@ const REPORT_TTL_MS = 2 * 60 * 60 * 1000;  // 2 h, le temps qu'un gros install t
 // On garde les 200 derniers déploiements pour ne pas faire enfler le JSON.
 const deployments = {};       // id -> { id, timestamp, user, softs, nodes, results }
 const HISTORY_MAX = 200;
+const GLPI_HISTORY_MAX = 500;
 const historyPath = () => path.join(__dirname, 'softctl-history.json');
+const glpiHistoryPath = () => path.join(__dirname, 'softctl-glpi-history.json');
+
+function loadGlpiHistory() {
+    try {
+        const raw = JSON.parse(fs.readFileSync(glpiHistoryPath(), 'utf8'));
+        (raw.runs || []).forEach((r) => { if (r && r.id) glpiAgentRuns[r.id] = r; });
+    } catch (_) {}
+}
+function saveGlpiHistory() {
+    try {
+        const list = Object.values(glpiAgentRuns).sort((a, b) => b.timestamp - a.timestamp).slice(0, GLPI_HISTORY_MAX);
+        fs.writeFileSync(glpiHistoryPath(), JSON.stringify({ runs: list }, null, 2));
+    } catch (_) {}
+}
 
 function loadHistory() {
     try {
@@ -254,6 +269,7 @@ module.exports.softctl = function (parent) {
 
     // Restaure l'historique au démarrage (on persiste à chaque update).
     loadHistory();
+    loadGlpiHistory();
 
     // ---- Maintenance Winget : scan périodique + auto-install via NAS ----
     function kickWingetScan(forceAll) {
@@ -386,11 +402,32 @@ module.exports.softctl = function (parent) {
             if (command.pluginaction === 'glpiAgentResult') {
                 const did = command.dispatchId;
                 if (!did) return;
-                const entry = glpiAgentPending[did];
-                if (!entry) return;
-                delete glpiAgentPending[did];
-                const run = glpiAgentRuns[entry.runId];
-                if (!run) return;
+                // Lookup principal via pendingDispatches (in-memory)
+                let entry = glpiAgentPending[did];
+                // Fallback : si MC a redémarré entre dispatch et result, on
+                // scanne les runs persistés pour retrouver le (runId, nodeId).
+                let run = null;
+                if (entry) {
+                    run = glpiAgentRuns[entry.runId];
+                    delete glpiAgentPending[did];
+                } else {
+                    Object.keys(glpiAgentRuns).some((rid) => {
+                        const r = glpiAgentRuns[rid];
+                        if (!r || !r.results) return false;
+                        return Object.keys(r.results).some((nid) => {
+                            if (r.results[nid] && r.results[nid].dispatchId === did) {
+                                entry = { runId: rid, nodeId: nid };
+                                run = r;
+                                return true;
+                            }
+                            return false;
+                        });
+                    });
+                }
+                if (!entry || !run) return;
+                // Idempotent : si déjà 'done', on n'écrase pas
+                const prev = run.results[entry.nodeId];
+                if (prev && (prev.status === 'done' || prev.status === 'error')) return;
                 run.results[entry.nodeId] = {
                     status: command.ok ? 'done' : 'error',
                     ok: !!command.ok,
@@ -403,6 +440,7 @@ module.exports.softctl = function (parent) {
                     time: Date.now(),
                 };
                 console.log('softctl: glpiAgentResult ' + entry.nodeId + ' = ' + (command.result || (command.ok ? 'ok' : 'err')));
+                saveGlpiHistory();
                 return;
             }
             if (command.pluginaction === 'wingetInventoryResult') {
@@ -674,12 +712,13 @@ module.exports.softctl = function (parent) {
                         desiredVersion: desiredVersion,
                         force: force,
                     }));
-                    run.results[nid] = { status: 'running', time: Date.now() };
+                    run.results[nid] = { status: 'running', time: Date.now(), dispatchId: did };
                     dispatched++;
                 } catch (e) {
                     run.results[nid] = { status: 'error', error: String(e), time: Date.now() };
                 }
             });
+            saveGlpiHistory();
             return sendJson(res, 200, { runId: runId, dispatched: dispatched, offline: offline });
         }
 
@@ -690,14 +729,59 @@ module.exports.softctl = function (parent) {
             // Watchdog : runs running depuis > 15 min sans heartbeat = abandonné
             const STALE = 15 * 60 * 1000;
             const now = Date.now();
+            let changed = false;
             Object.keys(run.results).forEach((nid) => {
                 const r = run.results[nid];
                 if (r.status === 'running' && (now - (r.time || run.timestamp)) > STALE) {
                     r.status = 'aborted';
                     r.error = 'poste injoignable (>15 min sans réponse)';
+                    changed = true;
                 }
             });
+            if (changed) saveGlpiHistory();
             return sendJson(res, 200, run);
+        }
+
+        if (action === 'glpiAgentHistory') {
+            const nodeId = String((req.query && req.query.nodeId) || '');
+            if (!nodeId) return sendJson(res, 400, { error: 'nodeId requis' });
+            // Applique le watchdog avant de retourner
+            const STALE = 15 * 60 * 1000;
+            const now = Date.now();
+            let changed = false;
+            Object.values(glpiAgentRuns).forEach((r) => {
+                if (!r || !r.results || !r.results[nodeId]) return;
+                const res2 = r.results[nodeId];
+                if (res2.status === 'running' && (now - (res2.time || r.timestamp)) > STALE) {
+                    res2.status = 'aborted';
+                    res2.error = 'poste injoignable (>15 min sans réponse)';
+                    changed = true;
+                }
+            });
+            if (changed) saveGlpiHistory();
+            const out = Object.values(glpiAgentRuns)
+                .filter((r) => r && r.results && r.results[nodeId])
+                .sort((a, b) => b.timestamp - a.timestamp)
+                .slice(0, 50)
+                .map((r) => {
+                    const res2 = r.results[nodeId];
+                    return {
+                        runId: r.id,
+                        timestamp: r.timestamp,
+                        user: r.user,
+                        glpiServer: r.glpiServer,
+                        tag: r.tag,
+                        desiredVersion: r.desiredVersion,
+                        msiName: r.msiName,
+                        force: r.force,
+                        status: res2.status,
+                        result: res2.result,
+                        installedVersion: res2.installedVersion,
+                        exitCode: res2.exitCode,
+                        error: res2.error,
+                    };
+                });
+            return sendJson(res, 200, { runs: out });
         }
 
         // ---- Phase 2: CRUD on the catalogue ----

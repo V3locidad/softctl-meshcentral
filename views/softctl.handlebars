@@ -244,32 +244,70 @@
         else alert('Erreur : ' + (r && r.error || 'inconnue'));
       });
     };
-    api('nodeHistory', { nodeId: nodeId }).then(function (r) {
+    // Charge en parallèle l'historique des softs et celui des GLPI Agent
+    Promise.all([
+      api('nodeHistory', { nodeId: nodeId }),
+      api('glpiAgentHistory', { nodeId: nodeId }),
+    ]).then(function (results) {
+      var r = results[0] || {};
+      var g = results[1] || {};
       var deps = r.deployments || [];
+      var glpi = g.runs || [];
+      var softHtml = '';
       if (!deps.length) {
-        bg.querySelector('#nhBody').innerHTML = '<div class="empty">Aucun déploiement sur ce poste.</div>';
-        return;
-      }
-      var html = deps.map(function (d) {
-        var when = new Date(d.timestamp).toLocaleString();
-        var items = (d.items || []).map(function (it) {
-          var cls = 'pending';
-          var label = it.status || 'pending';
-          if (it.status === 'success') { cls = 'success'; label = 'OK'; }
-          else if (it.status === 'fail') { cls = 'fail'; label = 'KO (' + (it.exitCode != null ? it.exitCode : '?') + ')'; }
-          else if (it.status === 'skipped') { cls = 'skipped'; label = 'ignoré'; }
-          else if (it.status === 'agent-offline') { cls = 'offline'; label = 'agent off'; }
-          else if (it.status === 'dispatch-failed') { cls = 'fail'; label = 'dispatch KO'; }
-          else if (it.status === 'cancelled') { cls = 'offline'; label = 'annulé'; }
-          else if (it.status === 'dispatched') { cls = 'pending'; label = 'envoyé'; }
-          return '<div style="margin-top:2px"><span class="resCell ' + cls + '">' + escapeHtml(label) + '</span> ' + escapeHtml(it.softName || it.softId) + '</div>';
+        softHtml = '<div class="empty">Aucun déploiement de logiciel sur ce poste.</div>';
+      } else {
+        softHtml = deps.map(function (d) {
+          var when = new Date(d.timestamp).toLocaleString();
+          var items = (d.items || []).map(function (it) {
+            var cls = 'pending';
+            var label = it.status || 'pending';
+            if (it.status === 'success') { cls = 'success'; label = 'OK'; }
+            else if (it.status === 'fail') { cls = 'fail'; label = 'KO (' + (it.exitCode != null ? it.exitCode : '?') + ')'; }
+            else if (it.status === 'skipped') { cls = 'skipped'; label = 'ignoré'; }
+            else if (it.status === 'agent-offline') { cls = 'offline'; label = 'agent off'; }
+            else if (it.status === 'dispatch-failed') { cls = 'fail'; label = 'dispatch KO'; }
+            else if (it.status === 'cancelled') { cls = 'offline'; label = 'annulé'; }
+            else if (it.status === 'dispatched') { cls = 'pending'; label = 'envoyé'; }
+            return '<div style="margin-top:2px"><span class="resCell ' + cls + '">' + escapeHtml(label) + '</span> ' + escapeHtml(it.softName || it.softId) + '</div>';
+          }).join('');
+          return '<div style="padding:8px;border-bottom:1px solid #eee">'
+               +   '<div><b>' + escapeHtml(when) + '</b> · par ' + escapeHtml(d.user || '?') + '</div>'
+               +   items
+               + '</div>';
         }).join('');
-        return '<div style="padding:8px;border-bottom:1px solid #eee">'
-             +   '<div><b>' + escapeHtml(when) + '</b> · par ' + escapeHtml(d.user || '?') + '</div>'
-             +   items
-             + '</div>';
-      }).join('');
-      bg.querySelector('#nhBody').innerHTML = html;
+      }
+
+      var glpiHtml = '';
+      if (!glpi.length) {
+        glpiHtml = '<div class="empty">Aucun déploiement de GLPI Agent sur ce poste.</div>';
+      } else {
+        glpiHtml = glpi.map(function (gr) {
+          var when = new Date(gr.timestamp).toLocaleString();
+          var st = gr.status || '?';
+          var cls = 'pending', label = st;
+          if (st === 'done')         { cls = 'success'; label = 'OK'; }
+          else if (st === 'error')   { cls = 'fail';    label = 'KO'; }
+          else if (st === 'aborted') { cls = 'fail';    label = 'abandonné'; }
+          else if (st === 'offline') { cls = 'offline'; label = 'offline'; }
+          else if (st === 'running') { cls = 'pending'; label = 'en cours'; }
+          var versions = '';
+          if (gr.installedVersion || gr.desiredVersion) {
+            versions = ' · ' + escapeHtml(gr.installedVersion || '—') + ' → ' + escapeHtml(gr.desiredVersion || '—');
+          }
+          var detail = gr.result ? (' · ' + escapeHtml(gr.result)) : '';
+          var force = gr.force ? ' · <span style="color:#c9302c">forcé</span>' : '';
+          return '<div style="padding:8px;border-bottom:1px solid #eee">'
+               +   '<div><b>' + escapeHtml(when) + '</b> · par ' + escapeHtml(gr.user || '?') + force + '</div>'
+               +   '<div style="margin-top:2px"><span class="resCell ' + cls + '">' + escapeHtml(label) + '</span>'
+               +     ' GLPI Agent' + versions + detail + '</div>'
+               + '</div>';
+        }).join('');
+      }
+
+      bg.querySelector('#nhBody').innerHTML =
+        '<div style="margin-bottom:8px"><h4 style="margin:6px 0">Logiciels</h4>' + softHtml + '</div>'
+        + '<div><h4 style="margin:6px 0">GLPI Agent</h4>' + glpiHtml + '</div>';
     });
   }
 
