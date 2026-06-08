@@ -197,36 +197,42 @@ function doGlpiAgentInstall(data) {
             var args = ['/i', msiPath, '/qn', '/norestart',
                 'SERVER=' + server,
                 'RUNNOW=1',
-                'REINSTALL=ALL', 'REINSTALLMODE=vomus',  // upgrade-friendly
+                'REINSTALL=ALL', 'REINSTALLMODE=vomus',
                 'ADDLOCAL=feat_INVENTORY,feat_NETWORK_INVENTORY,feat_REMOTEINVENTORY,feat_DEPLOY,feat_COLLECT,feat_ESX,feat_WAKEONLAN'];
             if (tag) args.push('TAG=' + tag);
-            // En install fresh, REINSTALL=ALL provoque erreur ; on l'enlève si pas installé
+            // En install fresh, REINSTALL=ALL erreur ; on l'enlève si pas installé
             if (!installedVersion) {
                 args = args.filter(function (a) { return a !== 'REINSTALL=ALL' && a !== 'REINSTALLMODE=vomus'; });
             }
             L('msiexec ' + args.join(' '));
 
-            try {
-                var msi = cp.execFile(windir + '\\System32\\msiexec.exe', args);
-                var done2 = false;
-                function finishMsi(mcode) {
-                    if (done2) return; done2 = true;
-                    try { fs.unlinkSync(msiPath); } catch (_) {}
-                    L('msiexec exit ' + mcode);
-                    var resStr = (mcode === 0) ? ('installed_' + (desiredVersion || 'msi'))
-                               : (mcode === 3010) ? 'installed_reboot_required'
-                               : 'msiexec_failed_' + mcode;
-                    var ok = (mcode === 0 || mcode === 3010);
-                    done(ok, resStr, mcode, installedVersion, ok ? undefined : ('msiexec exit ' + mcode));
-                }
-                if (msi.stdout) msi.stdout.on('data', function (d) { L('OUT: ' + d.toString().slice(0, 200)); });
-                if (msi.stderr) msi.stderr.on('data', function (d) { L('ERR: ' + d.toString().slice(0, 200)); });
-                msi.on('exit', finishMsi);
-                setTimeout(function () { if (!done2) { try { msi.kill(); } catch (_) {} finishMsi(-2); } }, 10 * 60 * 1000);
-            } catch (e) {
+            // IMPORTANT : cp.execFile('msiexec.exe', ...) ne reçoit jamais
+            // l'event 'exit' dans Duktape (msiexec ne ferme pas stdio proprement,
+            // même bug que DelProf2). On enrobe dans PowerShell Start-Process
+            // -Wait -PassThru qui retourne proprement avec l'ExitCode.
+            var argsLit = args.map(function (a) { return "'" + a.replace(/'/g, "''") + "'"; }).join(',');
+            var msiPs = ''
+                + '$ErrorActionPreference = "Stop";'
+                + 'try {'
+                + '  $p = Start-Process -FilePath "msiexec.exe" -ArgumentList @(' + argsLit + ')'
+                + '    -Wait -PassThru -WindowStyle Hidden;'
+                + '  Write-Host ("MSI_EXIT:" + [int]$p.ExitCode);'
+                + '} catch {'
+                + '  Write-Host ("MSI_ERR:" + $_.Exception.Message);'
+                + '  exit 1;'
+                + '}';
+            runPs(msiPs, 15 * 60 * 1000, function (pcode, out, perr) {
                 try { fs.unlinkSync(msiPath); } catch (_) {}
-                done(false, 'msiexec_spawn_failed', -1, installedVersion, e);
-            }
+                if (perr) { L('msi ps err: ' + perr); return done(false, 'msiexec_wrapper_failed', -1, installedVersion, perr); }
+                var exitM = (out || '').match(/MSI_EXIT:(-?\d+)/);
+                var mcode = exitM ? parseInt(exitM[1], 10) : pcode;
+                L('msiexec exit ' + mcode + ' (raw out: ' + (out || '').slice(0, 300) + ')');
+                var resStr = (mcode === 0) ? ('installed_' + (desiredVersion || 'msi'))
+                           : (mcode === 3010) ? 'installed_reboot_required'
+                           : 'msiexec_failed_' + mcode;
+                var ok = (mcode === 0 || mcode === 3010);
+                done(ok, resStr, mcode, installedVersion, ok ? undefined : ('msiexec exit ' + mcode));
+            });
         });
     });
 }
