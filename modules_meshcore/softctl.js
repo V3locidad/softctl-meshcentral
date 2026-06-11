@@ -254,11 +254,11 @@ function doGlpiAgentInstall(data) {
                 + '      Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue;'
                 + '    }'
                 + '  } catch {}'
-                + '}'
+                + '};'
                 + 'Get-Process -Name "glpi-agent*","perl" -ErrorAction SilentlyContinue | ForEach-Object {'
                 + '  Write-Host ("KILL_PROC:" + $_.Name);'
                 + '  try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}'
-                + '}'
+                + '};'
                 + 'Start-Sleep -Seconds 3;'
                 // Lance msiexec
                 + 'try {'
