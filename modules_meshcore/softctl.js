@@ -265,6 +265,17 @@ function doGlpiAgentInstall(data) {
                 + '  $p = Start-Process -FilePath "msiexec.exe" -ArgumentList @(' + argsLit + ')'
                 + '    -Wait -PassThru -WindowStyle Hidden;'
                 + '  Write-Host ("MSI_EXIT:" + [int]$p.ExitCode);'
+                + '  if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {'
+                + '    try {'
+                + '      $logPath = "' + msiLog.replace(/\\/g, '\\\\') + '";'
+                + '      if (Test-Path $logPath) {'
+                + '        $lines = Get-Content -LiteralPath $logPath -Encoding Unicode -ErrorAction SilentlyContinue;'
+                + '        if (-not $lines) { $lines = Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue; }'
+                + '        $hits = $lines | Where-Object { $_ -match "Return value 3|MainEngineThread|CustomAction.*returned actual error|Error \\d+\\.|Product:.*Installation failed" } | Select-Object -Last 15;'
+                + '        foreach ($l in $hits) { Write-Host ("MSI_LOG:" + $l); }'
+                + '      }'
+                + '    } catch {}'
+                + '  }'
                 + '} catch {'
                 + '  Write-Host ("MSI_ERR:" + $_.Exception.Message);'
                 + '  exit 1;'
@@ -276,15 +287,11 @@ function doGlpiAgentInstall(data) {
                 var mcode = exitM ? parseInt(exitM[1], 10) : pcode;
                 L('msiexec exit ' + mcode + ' (raw out: ' + (out || '').slice(0, 500) + ')');
                 if (mcode !== 0 && mcode !== 3010) {
-                    // Capture les dernières lignes du log MSI pour diagnostiquer
-                    try {
-                        var raw = fs.readFileSync(msiLog).toString();
-                        // Cherche les lignes d'erreur typiques (CustomAction, Error, return value 3)
-                        var errLines = raw.split(/\r?\n/).filter(function (line) {
-                            return /error|return value 3|MainEngineThread|CustomAction.*returned actual error/i.test(line);
-                        }).slice(-10);
-                        L('MSI log tail:\n' + errLines.join('\n'));
-                    } catch (e) { L('msi log read err: ' + e); }
+                    var logLines = [];
+                    var rx = /MSI_LOG:(.*)/g, mm;
+                    while ((mm = rx.exec(out || '')) !== null) { logLines.push(mm[1].trim()); }
+                    if (logLines.length) { L('MSI log tail:\n' + logLines.join('\n')); }
+                    else { L('MSI log tail: (aucune ligne d\'erreur trouvée dans ' + msiLog + ')'); }
                 }
                 try { fs.unlinkSync(msiLog); } catch (_) {}
                 var resStr = (mcode === 0) ? ('installed_' + (desiredVersion || 'msi'))
