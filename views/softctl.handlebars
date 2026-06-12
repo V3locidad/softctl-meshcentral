@@ -850,14 +850,15 @@
       api('glpiAgentDeploy', null, { nodes: nodeIds, force: force })
         .then(function (r) {
           if (r.error) { bg.querySelector('#glpiBody').innerHTML = '<div style="color:#721c24">⚠ ' + escapeHtml(r.error) + '</div>'; return; }
-          pollGlpiRun(r.runId, r.dispatched, r.offline, bg);
+          pollGlpiRun(r.runId, r.dispatched, r.offline, bg, r.queued || 0);
         })
         .catch(function (e) {
           bg.querySelector('#glpiBody').innerHTML = '<div style="color:#721c24">⚠ ' + escapeHtml(e.message) + '</div>';
         });
     };
   }
-  function pollGlpiRun(runId, dispatched, offline, bg) {
+  function pollGlpiRun(runId, dispatched, offline, bg, queued) {
+    queued = queued || 0;
     api('glpiAgentStatus', { runId: runId })
       .then(function (run) {
         var byId = {};
@@ -867,6 +868,7 @@
           var a = byId[nid] || {};
           var st;
           if (r.status === 'running')      st = '<span style="background:#fff3cd;padding:1px 6px;border-radius:3px;font-size:11px">en cours</span>';
+          else if (r.status === 'queued')  st = '<span style="background:#fff3cd;color:#856404;padding:1px 6px;border-radius:3px;font-size:11px" title="L\'install se lancera dès que le poste reviendra en ligne">en attente (off)</span>';
           else if (r.status === 'done')    st = '<span style="background:#d4edda;color:#155724;padding:1px 6px;border-radius:3px;font-size:11px">' + escapeHtml(r.result || 'OK') + '</span>';
           else if (r.status === 'offline') st = '<span style="background:#e2e3e5;color:#383d41;padding:1px 6px;border-radius:3px;font-size:11px">offline</span>';
           else if (r.status === 'aborted') st = '<span style="background:#f8d7da;color:#721c24;padding:1px 6px;border-radius:3px;font-size:11px" title="' + escapeHtml(r.error || '') + '">abandonné</span>';
@@ -885,7 +887,7 @@
           '<div style="font-size:11px;color:#888;margin-bottom:6px">Run ' + runId
           + (run.desiredVersion ? ' · MSI cible <b>' + escapeHtml(run.desiredVersion) + '</b>' : '')
           + (run.force ? ' · <span style="color:#c9302c">forcé</span>' : '')
-          + ' · ' + dispatched + ' dispatché(s) · ' + offline + ' offline</div>'
+          + ' · ' + dispatched + ' dispatché(s)' + (queued ? ' · ' + queued + ' en attente (PC éteints)' : '') + (offline && !queued ? ' · ' + offline + ' offline' : '') + '</div>'
           + '<table style="width:100%;border-collapse:collapse;font-size:12px">'
           + '<thead><tr style="background:#f4f4f4;text-align:left">'
           + '<th style="padding:5px">Poste</th>'
@@ -895,10 +897,10 @@
           + '<th style="padding:5px">Détail</th>'
           + '</tr></thead>'
           + '<tbody>' + rows + '</tbody></table>';
-        var pending = Object.values(run.results).some(function (r) { return r.status === 'running'; });
-        if (pending) setTimeout(function () { pollGlpiRun(runId, dispatched, offline, bg); }, 4000);
+        var pending = Object.values(run.results).some(function (r) { return r.status === 'running' || r.status === 'queued'; });
+        if (pending) setTimeout(function () { pollGlpiRun(runId, dispatched, offline, bg, queued); }, 4000);
       })
-      .catch(function () { setTimeout(function () { pollGlpiRun(runId, dispatched, offline, bg); }, 6000); });
+      .catch(function () { setTimeout(function () { pollGlpiRun(runId, dispatched, offline, bg, queued); }, 6000); });
   }
   $('glpiAgentBtn').onclick = openGlpiAgent;
 
