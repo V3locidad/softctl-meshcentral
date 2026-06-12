@@ -319,19 +319,39 @@ module.exports.softctl = function (parent) {
                 const remaining = [];
                 queue.forEach((it) => {
                     if (!it.baseUrl) { remaining.push(it); return; }
-                    const token = newDownloadToken(it.softId);
-                    const url = it.baseUrl + '/softctl-download/' + token;
-                    const message = {
-                        action: 'plugin', plugin: 'softctl', pluginaction: 'install',
-                        dispatchId: it.dispatchId, url: url,
-                        installer: it.installer, silentArgs: it.silentArgs || '',
-                        archiveInstaller: it.archiveInstaller || '',
-                    };
+                    let message;
+                    const kind = it.kind || 'install';
+                    if (kind === 'install') {
+                        const token = newDownloadToken(it.softId);
+                        const url = it.baseUrl + '/softctl-download/' + token;
+                        message = {
+                            action: 'plugin', plugin: 'softctl', pluginaction: 'install',
+                            dispatchId: it.dispatchId, url: url,
+                            installer: it.installer, silentArgs: it.silentArgs || '',
+                            archiveInstaller: it.archiveInstaller || '',
+                        };
+                    } else if (kind === 'glpiAgent') {
+                        const token = newDownloadToken('glpi-agent', 'glpiagent');
+                        const msiUrl = it.baseUrl + '/softctl-download/glpiagent/' + token;
+                        message = {
+                            action: 'plugin', plugin: 'softctl', pluginaction: 'glpiAgentInstall',
+                            dispatchId: it.dispatchId, msiUrl: msiUrl,
+                            glpiServer: it.glpiServer, tag: it.tag || '',
+                            desiredVersion: it.desiredVersion || '', force: !!it.force,
+                        };
+                    } else {
+                        remaining.push(it); return;
+                    }
                     try {
                         ws.send(JSON.stringify(message));
-                        const d = deployments[it.deploymentId];
-                        if (d) { d.results[it.key] = { status: 'dispatched', time: Date.now() }; }
-                        console.log('softctl: flush queued install ' + it.softId + ' -> ' + nodeId);
+                        if (kind === 'install') {
+                            const d = deployments[it.deploymentId];
+                            if (d) { d.results[it.key] = { status: 'dispatched', time: Date.now() }; }
+                        } else if (kind === 'glpiAgent') {
+                            const run = glpiAgentRuns[it.runId];
+                            if (run) { run.results[nodeId] = { status: 'running', time: Date.now(), dispatchId: it.dispatchId }; }
+                        }
+                        console.log('softctl: flush queued ' + kind + ' -> ' + nodeId);
                         changed = true;
                     } catch (e) {
                         console.log('softctl: flush failed for ' + nodeId + ': ' + e.message);
@@ -341,7 +361,7 @@ module.exports.softctl = function (parent) {
                 if (remaining.length) pendingInstalls[nodeId] = remaining;
                 else delete pendingInstalls[nodeId];
             });
-            if (changed) { savePending(); saveHistory(); }
+            if (changed) { savePending(); saveHistory(); saveGlpiHistory(); }
         } catch (e) {
             console.log('softctl: flushPendingInstalls error: ' + e.message);
         }
@@ -767,18 +787,31 @@ module.exports.softctl = function (parent) {
                 results: {},
             };
             glpiAgentRuns[runId] = run;
-            let dispatched = 0, offline = 0;
+            let dispatched = 0, queued = 0;
             const baseUrl = wingetMaintenanceState.baseUrl;
             if (!baseUrl) return sendJson(res, 500, { error: 'baseUrl serveur inconnue, recharge la page' });
             nodes.forEach((nid) => {
-                const ws = wsagents[nid];
-                if (!ws || typeof ws.send !== 'function') {
-                    run.results[nid] = { status: 'offline', time: Date.now() };
-                    offline++;
-                    return;
-                }
                 const did = crypto.randomBytes(16).toString('hex');
                 glpiAgentPending[did] = { runId: runId, nodeId: nid, expires: Date.now() + GLPI_AGENT_RUN_TTL };
+                const ws = wsagents[nid];
+                if (!ws || typeof ws.send !== 'function') {
+                    // Mise en queue : flush au reboot du poste.
+                    if (!pendingInstalls[nid]) pendingInstalls[nid] = [];
+                    pendingInstalls[nid].push({
+                        kind: 'glpiAgent',
+                        dispatchId: did,
+                        runId: runId,
+                        glpiServer: glpiServer,
+                        tag: tag,
+                        desiredVersion: desiredVersion,
+                        force: force,
+                        baseUrl: baseUrl,
+                        addedAt: Date.now(),
+                    });
+                    run.results[nid] = { status: 'queued', time: Date.now(), dispatchId: did };
+                    queued++;
+                    return;
+                }
                 const token = newDownloadToken('glpi-agent', 'glpiagent');
                 const msiUrl = baseUrl + '/softctl-download/glpiagent/' + token;
                 try {
@@ -798,7 +831,8 @@ module.exports.softctl = function (parent) {
                 }
             });
             saveGlpiHistory();
-            return sendJson(res, 200, { runId: runId, dispatched: dispatched, offline: offline });
+            if (queued) savePending();
+            return sendJson(res, 200, { runId: runId, dispatched: dispatched, queued: queued, offline: queued });
         }
 
         if (action === 'glpiAgentStatus') {

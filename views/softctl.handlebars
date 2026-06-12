@@ -293,6 +293,7 @@
           else if (st === 'error')   { cls = 'fail';    label = 'KO'; }
           else if (st === 'aborted') { cls = 'fail';    label = 'abandonné'; }
           else if (st === 'offline') { cls = 'offline'; label = 'offline'; }
+          else if (st === 'queued')  { cls = 'pending'; label = 'en attente (off)'; }
           else if (st === 'running') { cls = 'pending'; label = 'en cours'; }
           var versions = '';
           if (gr.installedVersion || gr.desiredVersion) {
