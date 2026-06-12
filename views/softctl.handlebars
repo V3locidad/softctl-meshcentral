@@ -301,8 +301,14 @@
           }
           var detail = gr.result ? (' · ' + escapeHtml(gr.result)) : '';
           var force = gr.force ? ' · <span style="color:#c9302c">forcé</span>' : '';
+          // Bouton de re-vérif : pour les runs aborted / offline où on suspecte
+          // que l'install a réussi mais que le report a été perdu.
+          var recheckBtn = '';
+          if (st === 'aborted' || st === 'offline' || st === 'queued' || st === 'error') {
+            recheckBtn = ' <button class="glpiRecheckBtn" data-rid="' + escapeHtml(gr.runId || '') + '" data-nid="' + escapeHtml(nodeId) + '" style="font-size:11px;padding:1px 6px" title="Demander à l\'agent sa version GLPI installée et mettre à jour ce run">🔁 Re-vérifier</button>';
+          }
           return '<div style="padding:8px;border-bottom:1px solid #eee">'
-               +   '<div><b>' + escapeHtml(when) + '</b> · par ' + escapeHtml(gr.user || '?') + force + '</div>'
+               +   '<div><b>' + escapeHtml(when) + '</b> · par ' + escapeHtml(gr.user || '?') + force + recheckBtn + '</div>'
                +   '<div style="margin-top:2px"><span class="resCell ' + cls + '">' + escapeHtml(label) + '</span>'
                +     ' GLPI Agent' + versions + detail + '</div>'
                + '</div>';
@@ -312,6 +318,18 @@
       bg.querySelector('#nhBody').innerHTML =
         '<div style="margin-bottom:8px"><h4 style="margin:6px 0">Logiciels</h4>' + softHtml + '</div>'
         + '<div><h4 style="margin:6px 0">GLPI Agent</h4>' + glpiHtml + '</div>';
+      [].slice.call(bg.querySelectorAll('.glpiRecheckBtn')).forEach(function (btn) {
+        btn.onclick = function () {
+          var rid = btn.getAttribute('data-rid');
+          var nid = btn.getAttribute('data-nid');
+          btn.disabled = true; btn.textContent = '…';
+          api('recheckGlpiAgent', { runId: rid, nodeId: nid }).then(function (r) {
+            if (r && r.error) { btn.disabled = false; btn.textContent = '🔁 Re-vérifier'; alert('Erreur : ' + r.error); return; }
+            // Laisse 3 s à l'agent pour répondre, puis recharge la modale.
+            setTimeout(function () { closeModal(bg); openNodeHistory(nodeId, nodeName); }, 3500);
+          }).catch(function (e) { btn.disabled = false; btn.textContent = '🔁 Re-vérifier'; alert('Erreur réseau : ' + e); });
+        };
+      });
     });
   }
 

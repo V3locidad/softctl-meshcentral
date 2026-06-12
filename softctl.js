@@ -840,7 +840,7 @@ module.exports.softctl = function (parent) {
             const run = glpiAgentRuns[id];
             if (!run) return sendJson(res, 404, { error: 'run inconnu' });
             // Watchdog : runs running depuis > 15 min sans heartbeat = abandonné
-            const STALE = 15 * 60 * 1000;
+            const STALE = 30 * 60 * 1000;
             const now = Date.now();
             let changed = false;
             Object.keys(run.results).forEach((nid) => {
@@ -859,7 +859,7 @@ module.exports.softctl = function (parent) {
             const nodeId = String((req.query && req.query.nodeId) || '');
             if (!nodeId) return sendJson(res, 400, { error: 'nodeId requis' });
             // Applique le watchdog avant de retourner
-            const STALE = 15 * 60 * 1000;
+            const STALE = 30 * 60 * 1000;
             const now = Date.now();
             let changed = false;
             Object.values(glpiAgentRuns).forEach((r) => {
@@ -1271,6 +1271,32 @@ module.exports.softctl = function (parent) {
             const d = deployments[id];
             if (!d) return sendJson(res, 404, { error: 'introuvable' });
             sendJson(res, 200, { deployment: d });
+            return;
+        }
+
+        if (action === 'recheckGlpiAgent') {
+            // Demande à l'agent sa version installée et met à jour le run sans
+            // relancer une install. Utile pour les runs marqués 'aborted' alors
+            // que l'install a réussi (report initial perdu).
+            const runId = String(req.query.runId || '');
+            const nodeId = String(req.query.nodeId || '');
+            const run = glpiAgentRuns[runId];
+            if (!run || !run.results || !run.results[nodeId]) return sendJson(res, 404, { error: 'run introuvable' });
+            const wsagents = (obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents) || {};
+            const ws = wsagents[nodeId];
+            if (!ws || typeof ws.send !== 'function') return sendJson(res, 400, { error: 'agent offline' });
+            const did = crypto.randomBytes(16).toString('hex');
+            glpiAgentPending[did] = { runId: runId, nodeId: nodeId, expires: Date.now() + GLPI_AGENT_RUN_TTL, verify: true };
+            run.results[nodeId] = Object.assign({}, run.results[nodeId], { status: 'running', time: Date.now(), dispatchId: did });
+            saveGlpiHistory();
+            try {
+                ws.send(JSON.stringify({
+                    action: 'plugin', plugin: 'softctl', pluginaction: 'glpiAgentVerify',
+                    dispatchId: did,
+                    desiredVersion: run.desiredVersion || '',
+                }));
+            } catch (e) { return sendJson(res, 500, { error: e.message }); }
+            sendJson(res, 200, { ok: true, dispatchId: did });
             return;
         }
 

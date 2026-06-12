@@ -55,6 +55,9 @@ function consoleaction(args, rights, sessionid, parent) {
             case 'glpiAgentInstall':
                 doGlpiAgentInstall(args);
                 return 'glpiAgentInstall started';
+            case 'glpiAgentVerify':
+                doGlpiAgentVerify(args);
+                return 'glpiAgentVerify started';
             default:
                 return 'softctl: action inconnue ' + fnname;
         }
@@ -69,6 +72,61 @@ function consoleaction(args, rights, sessionid, parent) {
 // ScriptTask s'en passe (les noms top-level passent), mais on évite tout
 // doute sur la résolution de require('softctl').consoleaction.
 module.exports = { consoleaction: consoleaction };
+
+// Vérification à la demande : lit uniquement la version installée et la
+// renvoie via glpiAgentResult, sans MSI. Utilisé pour réconcilier les runs
+// dont le report initial n'est jamais arrivé au serveur (poste éteint au mauvais
+// moment, WS instable, etc.).
+function doGlpiAgentVerify(data) {
+    if (process.platform !== 'win32') {
+        reply({ pluginaction: 'glpiAgentResult', dispatchId: data.dispatchId, ok: false, error: 'Windows only', verify: true });
+        return;
+    }
+    var fs = require('fs');
+    var cp = require('child_process');
+    var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
+    var tmpRoot = (process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp');
+    var ps1 = tmpRoot + '\\softctl_glpi_verify_' + Date.now() + '.ps1';
+    var script = ''
+        + '$ErrorActionPreference = "SilentlyContinue";'
+        + '$installed = $null;'
+        + 'foreach ($p in @("HKLM:\\SOFTWARE\\GLPI-Agent\\Installer","HKLM:\\SOFTWARE\\WOW6432Node\\GLPI-Agent\\Installer","HKLM:\\SOFTWARE\\GLPI-Agent","HKLM:\\SOFTWARE\\WOW6432Node\\GLPI-Agent")) {'
+        + '  if (Test-Path $p) { $v = (Get-ItemProperty -Path $p).Version; if ($v) { $installed = $v; break } }'
+        + '}'
+        + 'if (-not $installed) {'
+        + '  foreach ($u in @("HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall","HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall")) {'
+        + '    $hit = Get-ChildItem $u -ErrorAction SilentlyContinue | Get-ItemProperty | Where-Object { $_.DisplayName -like "*GLPI*Agent*" } | Select-Object -First 1;'
+        + '    if ($hit -and $hit.DisplayVersion) { $installed = $hit.DisplayVersion; break }'
+        + '  }'
+        + '}'
+        + 'Write-Host ("INSTALLED:" + $installed);';
+    try { fs.writeFileSync(ps1, script); } catch (e) {
+        reply({ pluginaction: 'glpiAgentResult', dispatchId: data.dispatchId, ok: false, error: 'write ps1: ' + e, verify: true });
+        return;
+    }
+    var psExe = windir + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+    var out = '';
+    var child;
+    try { child = cp.execFile(psExe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-File', ps1]); }
+    catch (e) {
+        try { fs.unlinkSync(ps1); } catch (_) {}
+        reply({ pluginaction: 'glpiAgentResult', dispatchId: data.dispatchId, ok: false, error: 'spawn ps: ' + e, verify: true });
+        return;
+    }
+    if (child.stdout) child.stdout.on('data', function (d) { out += d.toString(); });
+    if (child.stderr) child.stderr.on('data', function (d) { out += d.toString(); });
+    child.on('exit', function () {
+        try { fs.unlinkSync(ps1); } catch (_) {}
+        var m = (out || '').match(/INSTALLED:([^\r\n]*)/);
+        var v = (m && m[1] && m[1].trim()) || '';
+        reply({
+            pluginaction: 'glpiAgentResult', dispatchId: data.dispatchId,
+            ok: !!v, result: v ? ('verified_' + v) : 'not_installed',
+            installedVersion: v, desiredVersion: data.desiredVersion || '',
+            verify: true,
+        });
+    });
+}
 
 // Déploiement silencieux de GLPI Agent (MSI). Flow :
 // 1. Lit la version installée (registre)
