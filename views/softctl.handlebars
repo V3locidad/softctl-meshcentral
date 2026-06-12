@@ -83,10 +83,11 @@
 
   <div class="col">
     <h3>Postes <span id="agentCount" class="pill">0</span><span class="spacer"></span><button id="selAllAgent">Tout</button><button id="selNoneAgent">Aucun</button></h3>
-    <div class="search" style="display:flex;gap:6px;align-items:center">
+    <div class="search" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
       <select id="meshSel" style="padding:3px 6px;border:1px solid #bbb;border-radius:3px;font-size:13px;max-width:50%"></select>
       <button id="selMeshBtn">Cocher la salle</button>
-      <input type="text" id="agentFilter" placeholder="Filtrer (nom, salle, OS…)" style="flex:1">
+      <input type="text" id="agentFilter" placeholder="Filtrer (nom, salle, OS…)" style="flex:1;min-width:150px">
+      <label style="font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap" title="N'afficher que les postes actuellement connectés"><input type="checkbox" id="onlyOnline"> Seulement allumés</label>
     </div>
     <div class="body" id="agentList"><div class="empty">Chargement…</div></div>
   </div>
@@ -182,8 +183,10 @@
   function renderAgents() {
     var q = ($('agentFilter').value || '').toLowerCase().trim();
     var meshFilter = $('meshSel').value;  // empty = all salles
+    var onlyOnline = !!($('onlyOnline') && $('onlyOnline').checked);
     var rows = agents.filter(function (a) {
       if (meshFilter && a.meshid !== meshFilter) return false;
+      if (onlyOnline && !a.online) return false;
       if (!q) return true;
       return [a.name, a.os, a.mesh].some(function (v) { return (v || '').toLowerCase().indexOf(q) !== -1; });
     });
@@ -429,6 +432,7 @@
 
   $('softFilter').oninput = renderSoft;
   $('agentFilter').oninput = renderAgents;
+  if ($('onlyOnline')) $('onlyOnline').onchange = renderAgents;
   $('refreshBtn').onclick = load;
   $('selAllSoft').onclick = function () { softwares.forEach(function (s) { softSel[s.id] = true; }); renderSoft(); updateSummary(); };
   $('selNoneSoft').onclick = function () { softSel = {}; renderSoft(); updateSummary(); };
@@ -512,6 +516,7 @@
     if (st === 'agent-offline') return 'agent off';
     if (st === 'dispatch-failed') return 'dispatch KO';
     if (st === 'cancelled') return 'annulé';
+    if (st === 'queued') return 'en attente (off)';
     return 'en cours…';
   }
   function statusClass(st) {

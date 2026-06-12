@@ -77,6 +77,37 @@ function saveHistory() {
     } catch (e) {}
 }
 
+// Queue persistante des installs en attente d'un agent offline. Quand un poste
+// éteint reçoit une demande d'install, on stocke ici les paramètres bruts (pas
+// le message final, car le token de download a une TTL courte). Au moment du
+// flush (agent réapparu), on régénère le token et on envoie le message.
+const pendingInstalls = {};       // nodeId -> [ {dispatchId, deploymentId, key, softId, installer, silentArgs, archiveInstaller, addedAt} ]
+const PENDING_TTL_MS = 30 * 24 * 60 * 60 * 1000;  // 30 jours
+const pendingPath = () => path.join(__dirname, 'softctl-pending.json');
+function loadPending() {
+    try {
+        const raw = JSON.parse(fs.readFileSync(pendingPath(), 'utf8'));
+        Object.keys(raw || {}).forEach((nid) => {
+            if (Array.isArray(raw[nid])) pendingInstalls[nid] = raw[nid];
+        });
+    } catch (_) {}
+}
+function savePending() {
+    try { fs.writeFileSync(pendingPath(), JSON.stringify(pendingInstalls, null, 2)); }
+    catch (_) {}
+}
+function prunePending() {
+    const now = Date.now();
+    let changed = false;
+    Object.keys(pendingInstalls).forEach((nid) => {
+        const before = pendingInstalls[nid].length;
+        pendingInstalls[nid] = pendingInstalls[nid].filter((it) => (now - (it.addedAt || 0)) < PENDING_TTL_MS);
+        if (!pendingInstalls[nid].length) { delete pendingInstalls[nid]; changed = true; }
+        else if (pendingInstalls[nid].length !== before) changed = true;
+    });
+    if (changed) savePending();
+}
+
 function newDownloadToken(slug, kind) {
     const t = crypto.randomBytes(24).toString('hex');
     downloadTokens[t] = { slug: slug, kind: kind || 'soft', expires: Date.now() + TOKEN_TTL_MS };
@@ -270,6 +301,54 @@ module.exports.softctl = function (parent) {
     // Restaure l'historique au démarrage (on persiste à chaque update).
     loadHistory();
     loadGlpiHistory();
+    loadPending();
+    prunePending();
+
+    // Flush des installs en attente vers les agents qui sont revenus en ligne.
+    // Régénère un token frais à chaque envoi (TTL token = 30 min, queue = 30 j).
+    function flushPendingInstalls() {
+        try {
+            const wsagents = (obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents) || {};
+            let changed = false;
+            Object.keys(pendingInstalls).forEach((nodeId) => {
+                const ws = wsagents[nodeId];
+                if (!ws || typeof ws.send !== 'function') return;
+                const targetKey = ws.dbNodeKey || ws.nodeid || nodeId;
+                if (targetKey !== nodeId) return;
+                const queue = pendingInstalls[nodeId];
+                const remaining = [];
+                queue.forEach((it) => {
+                    if (!it.baseUrl) { remaining.push(it); return; }
+                    const token = newDownloadToken(it.softId);
+                    const url = it.baseUrl + '/softctl-download/' + token;
+                    const message = {
+                        action: 'plugin', plugin: 'softctl', pluginaction: 'install',
+                        dispatchId: it.dispatchId, url: url,
+                        installer: it.installer, silentArgs: it.silentArgs || '',
+                        archiveInstaller: it.archiveInstaller || '',
+                    };
+                    try {
+                        ws.send(JSON.stringify(message));
+                        const d = deployments[it.deploymentId];
+                        if (d) { d.results[it.key] = { status: 'dispatched', time: Date.now() }; }
+                        console.log('softctl: flush queued install ' + it.softId + ' -> ' + nodeId);
+                        changed = true;
+                    } catch (e) {
+                        console.log('softctl: flush failed for ' + nodeId + ': ' + e.message);
+                        remaining.push(it);
+                    }
+                });
+                if (remaining.length) pendingInstalls[nodeId] = remaining;
+                else delete pendingInstalls[nodeId];
+            });
+            if (changed) { savePending(); saveHistory(); }
+        } catch (e) {
+            console.log('softctl: flushPendingInstalls error: ' + e.message);
+        }
+    }
+    setInterval(flushPendingInstalls, 20 * 1000);
+    // Prune des items expirés une fois par jour.
+    setInterval(prunePending, 24 * 60 * 60 * 1000);
 
     // ---- Maintenance Winget : scan périodique + auto-install via NAS ----
     function kickWingetScan(forceAll) {
@@ -1014,11 +1093,8 @@ module.exports.softctl = function (parent) {
                 };
 
                 const results = [];
+                let queuedCount = 0;
                 installable.forEach((s) => {
-                    const token = newDownloadToken(s.id);
-                    // Route dédiée /softctl-download/<token>, hors pluginadmin.ashx.
-                    const url = baseUrl + '/softctl-download/' + token;
-
                     nodeIds.forEach((nodeId) => {
                         const key = s.id + '|' + nodeId;
                         // dispatchId = identifiant retourné par l'agent dans
@@ -1032,10 +1108,28 @@ module.exports.softctl = function (parent) {
 
                         const ws = wsagents[nodeId];
                         if (!ws || typeof ws.send !== 'function') {
-                            results.push({ softId: s.id, nodeId: nodeId, ok: false, error: 'agent déconnecté' });
-                            deployment.results[key] = { status: 'agent-offline', time: Date.now() };
+                            // Agent offline → on stocke en queue, l'install partira
+                            // au prochain rendez-vous (poller flushQueues).
+                            if (!pendingInstalls[nodeId]) pendingInstalls[nodeId] = [];
+                            pendingInstalls[nodeId].push({
+                                dispatchId: dispatchId,
+                                deploymentId: deploymentId,
+                                key: key,
+                                softId: s.id,
+                                installer: s.installer,
+                                silentArgs: s.silentArgs || '',
+                                archiveInstaller: s.archiveInstaller || '',
+                                baseUrl: baseUrl,
+                                addedAt: Date.now(),
+                            });
+                            results.push({ softId: s.id, nodeId: nodeId, ok: true, queued: true });
+                            deployment.results[key] = { status: 'queued', time: Date.now() };
+                            queuedCount++;
                             return;
                         }
+                        // Token frais pour les agents en ligne.
+                        const token = newDownloadToken(s.id);
+                        const url = baseUrl + '/softctl-download/' + token;
                         const targetKey = ws.dbNodeKey || ws.nodeid || nodeId;
                         if (targetKey !== nodeId) {
                             console.log('softctl: REJET dispatch ' + nodeId + ' — wsagent.dbNodeKey=' + targetKey);
@@ -1071,16 +1165,22 @@ module.exports.softctl = function (parent) {
                     });
                 });
 
-                const ok = results.filter((r) => r.ok).length;
-                const fail = results.length - ok;
+                const ok = results.filter((r) => r.ok && !r.queued).length;
+                const fail = results.filter((r) => !r.ok).length;
                 deployments[deploymentId] = deployment;
                 saveHistory();
+                if (queuedCount) savePending();
+                const note = ok + ' commande(s) envoyée(s)'
+                    + (queuedCount ? ', ' + queuedCount + ' en attente (PC éteints)' : '')
+                    + (fail ? ', ' + fail + ' échec(s) au dispatch' : '')
+                    + '. Les résultats remonteront automatiquement.';
                 sendJson(res, 200, {
                     deploymentId: deploymentId,
                     dispatched: ok,
+                    queued: queuedCount,
                     failed: fail,
                     total: results.length,
-                    note: ok + ' commande(s) envoyée(s), ' + fail + ' échec(s) au dispatch. Les résultats remonteront automatiquement.',
+                    note: note,
                     results: results.slice(0, 50),
                 });
             })();
@@ -1137,6 +1237,39 @@ module.exports.softctl = function (parent) {
             const d = deployments[id];
             if (!d) return sendJson(res, 404, { error: 'introuvable' });
             sendJson(res, 200, { deployment: d });
+            return;
+        }
+
+        if (action === 'pendingList') {
+            // Renvoie la queue par nodeId (compte + items résumés) pour l'UI.
+            const summary = {};
+            Object.keys(pendingInstalls).forEach((nid) => {
+                summary[nid] = pendingInstalls[nid].map((it) => ({
+                    softId: it.softId, addedAt: it.addedAt, deploymentId: it.deploymentId,
+                }));
+            });
+            sendJson(res, 200, { pending: summary });
+            return;
+        }
+
+        if (action === 'cancelPending') {
+            // Annule la queue d'un node (ou un item précis si dispatchId fourni).
+            const nodeId = String(req.query.nodeId || '');
+            const dispatchId = String(req.query.dispatchId || '');
+            if (!nodeId || !pendingInstalls[nodeId]) return sendJson(res, 200, { ok: true, removed: 0 });
+            const before = pendingInstalls[nodeId].length;
+            if (dispatchId) {
+                pendingInstalls[nodeId] = pendingInstalls[nodeId].filter((it) => it.dispatchId !== dispatchId);
+            } else {
+                pendingInstalls[nodeId].forEach((it) => {
+                    const d = deployments[it.deploymentId];
+                    if (d && d.results[it.key]) d.results[it.key] = { status: 'cancelled', time: Date.now() };
+                });
+                pendingInstalls[nodeId] = [];
+            }
+            if (!pendingInstalls[nodeId].length) delete pendingInstalls[nodeId];
+            savePending(); saveHistory();
+            sendJson(res, 200, { ok: true, removed: before - (pendingInstalls[nodeId] ? pendingInstalls[nodeId].length : 0) });
             return;
         }
 
