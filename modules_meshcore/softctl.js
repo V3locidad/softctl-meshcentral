@@ -697,21 +697,35 @@ function runInstaller(target, silentArgs, L, done) {
     } else {
         cmdLine = '"' + target + '"' + (silentArgs ? ' ' + silentArgs : '');
     }
-    // Capture stdout+stderr du .cmd/.exe pour pouvoir diagnostiquer un bail
-    // (sinon on n'a qu'un exit code, impossible à interpréter).
+    // Capture stdout+stderr du .cmd/.exe pour pouvoir diagnostiquer un bail.
+    // On passe par un .bat intermédiaire pour éviter le piège de cmd /c qui
+    // strip les quotes externes quand cmdLine commence par " et contient des
+    // redirections — la commande devient malformée et exit 1 sans rien lancer.
     var fs = require('fs');
     var tmpRoot = (process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp');
-    var runLog = tmpRoot + '\\softctl_run_' + Date.now() + '_' + Math.floor(Math.random() * 1e9) + '.log';
-    var argv = ['/c', cmdLine + ' > "' + runLog + '" 2>&1'];
+    var stamp = Date.now() + '_' + Math.floor(Math.random() * 1e9);
+    var runLog = tmpRoot + '\\softctl_run_' + stamp + '.log';
+    var runBat = tmpRoot + '\\softctl_run_' + stamp + '.bat';
+    try {
+        fs.writeFileSync(runBat, '@echo off\r\n' + cmdLine + ' > "' + runLog + '" 2>&1\r\n');
+    } catch (e) {
+        L('write runBat: ' + e);
+        return done(-1, e);
+    }
+    var argv = ['/c', runBat];
     L('exec cmd /c ' + cmdLine);
     function readRunLog() {
         try {
-            if (!fs.existsSync(runLog)) return;
-            var txt = fs.readFileSync(runLog, 'utf8').toString();
-            txt = txt.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '\n');
-            var lines = txt.split('\n').map(function (s) { return s.trim(); }).filter(Boolean).slice(-25);
-            for (var i = 0; i < lines.length; i++) L('out: ' + lines[i]);
-            try { fs.unlinkSync(runLog); } catch (_) {}
+            if (fs.existsSync(runLog)) {
+                var txt = fs.readFileSync(runLog, 'utf8').toString();
+                txt = txt.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '\n');
+                var lines = txt.split('\n').map(function (s) { return s.trim(); }).filter(Boolean).slice(-25);
+                for (var i = 0; i < lines.length; i++) L('out: ' + lines[i]);
+                try { fs.unlinkSync(runLog); } catch (_) {}
+            } else {
+                L('out: (aucune sortie capturée — vérifier les droits d\'écriture sur ' + tmpRoot + ')');
+            }
+            try { fs.unlinkSync(runBat); } catch (_) {}
         } catch (e) { L('readRunLog err: ' + e); }
     }
     try {
