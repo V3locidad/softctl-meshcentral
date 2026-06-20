@@ -715,18 +715,22 @@ function runInstaller(target, silentArgs, L, done) {
     var argv = ['/c', runBat];
     L('exec cmd /c ' + cmdLine);
     function readRunLog() {
+        var txt = '';
         try {
-            if (fs.existsSync(runLog)) {
-                var txt = fs.readFileSync(runLog, 'utf8').toString();
+            var buf = fs.readFileSync(runLog);
+            if (buf == null) txt = '';
+            else if (typeof buf === 'string') txt = buf;
+            else { try { txt = buf.toString('utf8'); } catch (_) { try { txt = String.fromCharCode.apply(null, buf); } catch (__) { txt = ''; } } }
+        } catch (e) { L('out: (lecture log impossible: ' + e + ')'); }
+        if (txt) {
+            try {
                 txt = txt.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '\n');
                 var lines = txt.split('\n').map(function (s) { return s.trim(); }).filter(Boolean).slice(-25);
                 for (var i = 0; i < lines.length; i++) L('out: ' + lines[i]);
-                try { fs.unlinkSync(runLog); } catch (_) {}
-            } else {
-                L('out: (aucune sortie capturée — vérifier les droits d\'écriture sur ' + tmpRoot + ')');
-            }
-            try { fs.unlinkSync(runBat); } catch (_) {}
-        } catch (e) { L('readRunLog err: ' + e); }
+            } catch (e2) { L('parse log err: ' + e2); }
+        }
+        try { fs.unlinkSync(runLog); } catch (_) {}
+        try { fs.unlinkSync(runBat); } catch (_) {}
     }
     try {
         var child = cp.execFile(exe, argv);
