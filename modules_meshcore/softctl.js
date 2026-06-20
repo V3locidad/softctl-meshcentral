@@ -697,8 +697,23 @@ function runInstaller(target, silentArgs, L, done) {
     } else {
         cmdLine = '"' + target + '"' + (silentArgs ? ' ' + silentArgs : '');
     }
-    var argv = ['/c', cmdLine + ' >nul 2>nul'];
+    // Capture stdout+stderr du .cmd/.exe pour pouvoir diagnostiquer un bail
+    // (sinon on n'a qu'un exit code, impossible à interpréter).
+    var fs = require('fs');
+    var tmpRoot = (process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp');
+    var runLog = tmpRoot + '\\softctl_run_' + Date.now() + '_' + Math.floor(Math.random() * 1e9) + '.log';
+    var argv = ['/c', cmdLine + ' > "' + runLog + '" 2>&1'];
     L('exec cmd /c ' + cmdLine);
+    function readRunLog() {
+        try {
+            if (!fs.existsSync(runLog)) return;
+            var txt = fs.readFileSync(runLog, 'utf8').toString();
+            txt = txt.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '\n');
+            var lines = txt.split('\n').map(function (s) { return s.trim(); }).filter(Boolean).slice(-25);
+            for (var i = 0; i < lines.length; i++) L('out: ' + lines[i]);
+            try { fs.unlinkSync(runLog); } catch (_) {}
+        } catch (e) { L('readRunLog err: ' + e); }
+    }
     try {
         var child = cp.execFile(exe, argv);
         var finished = false;
@@ -709,6 +724,7 @@ function runInstaller(target, silentArgs, L, done) {
             child.on('exit', function (code) {
                 if (finished) return;
                 finished = true;
+                readRunLog();
                 L('exit ' + code);
                 done(typeof code === 'number' ? code : -1);
             });
@@ -716,6 +732,7 @@ function runInstaller(target, silentArgs, L, done) {
         // Si déjà exited entre temps (race), on déclenche manuellement.
         if (typeof child.exitCode === 'number' && !finished) {
             finished = true;
+            readRunLog();
             L('exit (immédiat) ' + child.exitCode);
             done(child.exitCode);
             return;
@@ -725,6 +742,7 @@ function runInstaller(target, silentArgs, L, done) {
             if (finished) return;
             finished = true;
             try { child.kill(); } catch (e) {}
+            readRunLog();
             L('timeout (30 min)');
             done(-1, 'timeout');
         }, 30 * 60 * 1000);
