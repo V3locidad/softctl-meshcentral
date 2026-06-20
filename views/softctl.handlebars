@@ -1002,6 +1002,7 @@
           var avC   = colName(rows[0], ['Available', 'Disponible', 'Disponibilité']);
           var srcC  = colName(rows[0], ['Source']);
           var html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'
+                   + (mode === 'upgrade' ? '<th style="padding:4px;border-bottom:2px solid #ccc;width:28px"><input type="checkbox" id="invSelAll" title="Tout sélectionner"></th>' : '')
                    + '<th style="text-align:left;padding:4px;border-bottom:2px solid #ccc">Nom</th>'
                    + '<th style="text-align:left;padding:4px;border-bottom:2px solid #ccc">Id</th>'
                    + '<th style="text-align:left;padding:4px;border-bottom:2px solid #ccc">Version</th>'
@@ -1017,6 +1018,7 @@
             var av = avC ? row[avC] : '';
             var src = srcC ? row[srcC] : '';
             html += '<tr>'
+                  + (mode === 'upgrade' ? '<td style="padding:4px;border-bottom:1px solid #f0f0f0;text-align:center"><input type="checkbox" class="invPick" data-pkg="' + escapeHtml(id) + '"></td>' : '')
                   + '<td style="padding:4px;border-bottom:1px solid #f0f0f0">' + escapeHtml(name) + '</td>'
                   + '<td style="padding:4px;border-bottom:1px solid #f0f0f0;font-family:monospace;font-size:12px">' + escapeHtml(id) + '</td>'
                   + '<td style="padding:4px;border-bottom:1px solid #f0f0f0">' + escapeHtml(ver) + '</td>'
@@ -1032,8 +1034,28 @@
           html += '</tbody></table>';
           return html;
         }
-        var upgHead = '<div style="margin:8px 0 4px 0;font-weight:bold">⬆ Mises à jour disponibles <span class="pill">' + upgrades.length + '</span>'
-                    + (upgrades.length ? ' <button id="invUpgAll" style="margin-left:8px">⬆ Tout mettre à jour</button>' : '')
+        var targetsHtml = '';
+        if (upgrades.length) {
+          var otherAgents = (agents || []).filter(function (a) { return a.id !== nodeId && a.online; });
+          otherAgents.sort(function (a, b) { return (a.name || '').localeCompare(b.name || ''); });
+          targetsHtml = '<div style="margin:8px 0 4px 0;padding:6px 8px;background:#f6f8fa;border:1px solid #e1e4e8;border-radius:4px">'
+                      + '<div style="font-size:12px;color:#444;margin-bottom:4px"><b>🎯 Postes cibles</b> — les MAJ choisies seront appliquées à : <span id="invTgtCount">1</span> poste(s)</div>'
+                      + '<div><label style="display:inline-block;margin-right:10px;font-size:12px"><input type="checkbox" class="invTgt" data-nid="' + escapeHtml(nodeId) + '" checked disabled> ' + escapeHtml(label) + ' <i style="color:#888">(inventorié)</i></label>';
+          if (otherAgents.length) {
+            targetsHtml += ' <button id="invTgtToggle" style="font-size:11px;margin-left:6px">+ Ajouter d\'autres postes (' + otherAgents.length + ' en ligne)</button>'
+                        + '<div id="invTgtList" style="display:none;margin-top:6px;max-height:140px;overflow:auto;border-top:1px solid #ddd;padding-top:6px">';
+            otherAgents.forEach(function (a) {
+              targetsHtml += '<label style="display:inline-block;margin-right:10px;font-size:12px;white-space:nowrap"><input type="checkbox" class="invTgt" data-nid="' + escapeHtml(a.id) + '"> ' + escapeHtml(a.name) + '</label>';
+            });
+            targetsHtml += '<div style="margin-top:4px"><button id="invTgtAll" style="font-size:11px">Tout cocher</button> <button id="invTgtNone" style="font-size:11px">Tout décocher</button></div>';
+            targetsHtml += '</div>';
+          }
+          targetsHtml += '</div></div>';
+        }
+        var upgHead = targetsHtml
+                    + '<div style="margin:8px 0 4px 0;font-weight:bold">⬆ Mises à jour disponibles <span class="pill">' + upgrades.length + '</span>'
+                    + (upgrades.length ? ' <button id="invUpgSel" style="margin-left:8px" disabled>⬆ MAJ sélection (<span id="invSelCount">0</span>)</button>' : '')
+                    + (upgrades.length ? ' <button id="invUpgAll" style="margin-left:4px">⬆ Tout mettre à jour</button>' : '')
                     + '</div>';
         var insHead = '<div style="margin:14px 0 4px 0;font-weight:bold">📚 Logiciels installés <span class="pill">' + installed.length + '</span></div>';
         var rawDump = '';
@@ -1047,9 +1069,20 @@
         }
         box.innerHTML = upgHead + renderTable(upgrades, 'upgrade') + insHead + renderTable(installed, 'installed') + rawDump;
 
-        function dispatchAction(mode, packageIds) {
-          if (!confirm('Confirmer : ' + mode + ' ' + (packageIds[0] === '*' ? '(tout)' : packageIds.join(', ')) + ' sur ' + label + ' ?')) return;
-          var body = { nodeIds: [nodeId], mode: mode, force: false };
+        function getTargetNodeIds(allowMulti) {
+          if (!allowMulti) return [nodeId];
+          var tgts = [];
+          Array.prototype.forEach.call(box.querySelectorAll('.invTgt'), function (c) {
+            if (c.checked) tgts.push(c.getAttribute('data-nid'));
+          });
+          if (!tgts.length) tgts = [nodeId];
+          return tgts;
+        }
+        function dispatchAction(mode, packageIds, allowMulti) {
+          var tgts = getTargetNodeIds(allowMulti);
+          var who = (tgts.length === 1) ? label : (tgts.length + ' postes');
+          if (!confirm('Confirmer : ' + mode + ' ' + (packageIds[0] === '*' ? '(tout)' : packageIds.join(', ')) + ' sur ' + who + ' ?')) return;
+          var body = { nodeIds: tgts, mode: mode, force: false };
           if (packageIds[0] === '*') body.packageIds = ['*']; else body.packageIds = packageIds;
           api('wingetDeploy', null, body).then(function (rr) {
             if (rr.error) { alert('Erreur: ' + rr.error); return; }
@@ -1058,10 +1091,56 @@
           });
         }
         Array.prototype.forEach.call(box.querySelectorAll('.invAct'), function (btn) {
-          btn.onclick = function () { dispatchAction(btn.getAttribute('data-mode'), [btn.getAttribute('data-pkg')]); };
+          btn.onclick = function () { dispatchAction(btn.getAttribute('data-mode'), [btn.getAttribute('data-pkg')], false); };
         });
         var upgAll = box.querySelector('#invUpgAll');
-        if (upgAll) upgAll.onclick = function () { dispatchAction('upgrade-all', ['*']); };
+        if (upgAll) upgAll.onclick = function () { dispatchAction('upgrade-all', ['*'], true); };
+        var tgtToggle = box.querySelector('#invTgtToggle');
+        var tgtList = box.querySelector('#invTgtList');
+        var tgtCount = box.querySelector('#invTgtCount');
+        var tgtBoxes = box.querySelectorAll('.invTgt');
+        function refreshTgtCount() {
+          var n = 0;
+          Array.prototype.forEach.call(tgtBoxes, function (c) { if (c.checked) n++; });
+          if (tgtCount) tgtCount.textContent = n;
+        }
+        if (tgtToggle) tgtToggle.onclick = function () {
+          if (!tgtList) return;
+          tgtList.style.display = (tgtList.style.display === 'none') ? '' : 'none';
+        };
+        Array.prototype.forEach.call(tgtBoxes, function (c) { c.onchange = refreshTgtCount; });
+        var tgtAll = box.querySelector('#invTgtAll');
+        var tgtNone = box.querySelector('#invTgtNone');
+        if (tgtAll) tgtAll.onclick = function () {
+          Array.prototype.forEach.call(tgtBoxes, function (c) { if (!c.disabled) c.checked = true; });
+          refreshTgtCount();
+        };
+        if (tgtNone) tgtNone.onclick = function () {
+          Array.prototype.forEach.call(tgtBoxes, function (c) { if (!c.disabled) c.checked = false; });
+          refreshTgtCount();
+        };
+        var picks = box.querySelectorAll('.invPick');
+        var selAll = box.querySelector('#invSelAll');
+        var upgSel = box.querySelector('#invUpgSel');
+        var selCount = box.querySelector('#invSelCount');
+        function refreshSelCount() {
+          var n = 0;
+          Array.prototype.forEach.call(picks, function (c) { if (c.checked) n++; });
+          if (selCount) selCount.textContent = n;
+          if (upgSel) upgSel.disabled = (n === 0);
+          if (selAll) selAll.checked = (n > 0 && n === picks.length);
+        }
+        Array.prototype.forEach.call(picks, function (c) { c.onchange = refreshSelCount; });
+        if (selAll) selAll.onchange = function () {
+          Array.prototype.forEach.call(picks, function (c) { c.checked = selAll.checked; });
+          refreshSelCount();
+        };
+        if (upgSel) upgSel.onclick = function () {
+          var ids = [];
+          Array.prototype.forEach.call(picks, function (c) { if (c.checked) ids.push(c.getAttribute('data-pkg')); });
+          if (!ids.length) return;
+          dispatchAction('upgrade', ids, true);
+        };
       });
     }
     bg.querySelector('#invRefresh').onclick = fetchAndRender;
