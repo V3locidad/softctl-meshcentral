@@ -269,18 +269,42 @@ module.exports.softctl = function (parent) {
         const wsagents = (obj.meshServer && obj.meshServer.webserver && obj.meshServer.webserver.wsagents) || {};
         db.GetAllType('mesh', function (meshErr, meshDocs) {
             if (meshErr) return cb(meshErr);
+            // MC peut conserver plusieurs mesh docs avec le même nom (résidu de
+            // meshes recréés/supprimés-non-purgés). On dédoublonne par nom : on
+            // garde un id canonique par nom (celui avec le plus d'agents) et on
+            // remappe tous les agents des autres ids vers ce canonique.
             const meshById = {};
-            (meshDocs || []).forEach((m) => { if (m && m._id) meshById[m._id] = m.name || m._id; });
+            (meshDocs || []).filter((m) => m && m._id && !m.deleted).forEach((m) => {
+                meshById[m._id] = m.name || m._id;
+            });
             db.GetAllType('node', function (err, docs) {
                 if (err) return cb(err);
-                const agents = (docs || []).filter((d) => d && d._id && (d.agent || d.osdesc)).map((d) => {
+                const rawAgents = (docs || []).filter((d) => d && d._id && (d.agent || d.osdesc));
+                // Compte des agents par meshid pour choisir l'id canonique par nom.
+                const countByMid = {};
+                rawAgents.forEach((d) => { const m = d.meshid || ''; countByMid[m] = (countByMid[m] || 0) + 1; });
+                const canonicalIdByName = {};
+                Object.keys(meshById).forEach((mid) => {
+                    const name = meshById[mid];
+                    const cur = canonicalIdByName[name];
+                    if (!cur || (countByMid[mid] || 0) > (countByMid[cur] || 0)) {
+                        canonicalIdByName[name] = mid;
+                    }
+                });
+                const remap = {};
+                Object.keys(meshById).forEach((mid) => {
+                    remap[mid] = canonicalIdByName[meshById[mid]] || mid;
+                });
+                const agents = rawAgents.map((d) => {
                     const family = (d.agent && AGENT_TYPE[d.agent.id]) || '';
                     const os = d.osdesc || family || '?';
+                    const origMid = d.meshid || '';
+                    const mid = remap[origMid] || origMid;
                     return {
                         id: d._id,
                         name: d.name || d.host || d._id,
-                        meshid: d.meshid || '',
-                        mesh: meshById[d.meshid] || '',
+                        meshid: mid,
+                        mesh: meshById[mid] || meshById[origMid] || '',
                         os: os,
                         family: family,
                         arch: (d.agent && AGENT_ARCH[d.agent.id]) || '',
@@ -289,9 +313,11 @@ module.exports.softctl = function (parent) {
                     };
                 });
                 agents.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { numeric: true }));
-                // Surface the mesh catalogue alongside so the dropdown can be built
-                // even when no agents currently belong to a particular salle.
-                const meshes = Object.keys(meshById).map((id) => ({ id: id, name: meshById[id] }));
+                // Liste des salles : un seul item par nom (id canonique).
+                const meshes = Object.keys(canonicalIdByName).map((name) => ({
+                    id: canonicalIdByName[name],
+                    name: name,
+                }));
                 meshes.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { numeric: true }));
                 cb(null, agents, meshes);
             });
