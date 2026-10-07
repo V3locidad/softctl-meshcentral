@@ -20,14 +20,23 @@ function harness(options = {}) {
     let timerId = 0;
     const fakeFs = {
         mkdirSync() {},
-        writeFileSync(filename, data) { files.set(filename, data); },
+        writeFileSync(filename, data) {
+            files.set(filename, data);
+            if (options.staleStatus && filename.endsWith('.bat')) {
+                files.set(filename + '.exit', 'SOFTCTL_EXIT=0\r\n');
+                files.set(filename + '.exit.tmp', 'SOFTCTL_EXIT=0\r\n');
+            }
+        },
         existsSync(filename) { return files.has(filename); },
         readFileSync(filename) {
             assert.equal(arguments.length, 1, 'MeshAgent fs.readFileSync ne prend pas encoding');
             if (!files.has(filename)) throw new Error('ENOENT: ' + filename);
             return Buffer.from(files.get(filename));
         },
-        unlinkSync(filename) { files.delete(filename); },
+        unlinkSync(filename) {
+            if (options.lockedStatus && filename.endsWith('.exit')) throw new Error('EACCES');
+            files.delete(filename);
+        },
     };
     const fakeCp = {
         execFile(exe, argv) {
@@ -88,7 +97,12 @@ function harness(options = {}) {
         timers.delete(entry[0]);
         entry[1].fn();
     }
-    return { files, timers, children, replies, removed, install, extraction, timeout };
+    function installerBatch() {
+        const filename = [...files.keys()].find((p) => /softctl_run_.*\.bat$/.test(p));
+        assert.ok(filename, 'batch de lancement attendu');
+        return filename;
+    }
+    return { files, timers, children, replies, removed, install, extraction, timeout, installerBatch };
 }
 
 test('ZIP : poursuit après extraction même si cmd produit stdout/stderr, puis remonte un seul résultat', () => {
@@ -223,4 +237,98 @@ test('PowerShell : erreurs bloquantes et apostrophes du chemin échappées', () 
     assert.ok(script.includes('SOFTCTL_EXTRACT_EXIT=%softctl_extract_exit%'));
     assert.match(script, /set "softctl_extract_exit=%errorlevel%"\r\n/);
     assert.match(script, /exit \/b %softctl_extract_exit%\r\n$/);
+});
+
+for (const code of [0, 1603, -1978335189]) {
+    test('événement exit absent : récupère le code ' + code + ' sans tuer ni relancer le programme', () => {
+        const h = harness();
+        h.install({ installer: 'Setup.exe' });
+        const batch = h.installerBatch();
+        h.files.set(batch.replace(/\.bat$/, '.log'), 'installation output');
+        h.files.set(batch + '.exit', 'SOFTCTL_EXIT=' + code + '\r\n');
+        h.timeout(1000);
+        assert.equal(h.replies.length, 1);
+        assert.equal(h.replies[0].exit, code);
+        assert.match(h.replies[0].log, /cmd exit recovered from status file/);
+        assert.match(h.replies[0].log, /installation output/);
+        assert.equal(h.children.length, 1);
+        assert.equal(h.children[0].killCount, 0);
+        assert.equal(h.timers.size, 0);
+        assert.equal(h.files.has(batch + '.exit'), false);
+        h.children[0].emit('exit', code); // L'événement finit par arriver.
+        assert.equal(h.replies.length, 1);
+        assert.equal(h.removed.length, 1);
+    });
+}
+
+test('événement exit absent pendant extraction puis installation : chaîne complète', () => {
+    const h = harness();
+    h.install();
+    const extraction = h.extraction();
+    h.files.set(extraction.folder + 'extract\\bin\\Setup.exe', 'fake executable');
+    h.files.set(extraction.batPath + '.exit', 'SOFTCTL_EXIT=0\r\n');
+    h.timeout(1000);
+    assert.equal(h.children.length, 2);
+    assert.equal(h.replies.length, 0);
+    h.children[0].emit('exit', 0); // Ne pas relancer une seconde installation.
+    assert.equal(h.children.length, 2);
+    h.files.set(h.installerBatch() + '.exit', 'SOFTCTL_EXIT=0\r\n');
+    h.timeout(1000);
+    assert.equal(h.replies.length, 1);
+    assert.equal(h.replies[0].exit, 0);
+    assert.equal(h.timers.size, 0);
+});
+
+test('texte de réussite, fichier temporaire et résultat incomplet ne valident jamais le déploiement', () => {
+    const h = harness();
+    h.install({ installer: 'Setup.exe' });
+    const batch = h.installerBatch();
+    h.files.set(batch.replace(/\.bat$/, '.log'), 'Uninstall completed successfully.');
+    h.files.set(batch + '.exit.tmp', 'SOFTCTL_EXIT=0\r\n');
+    h.timeout(1000);
+    assert.equal(h.replies.length, 0);
+    for (const invalid of ['', '0\r\n', 'SOFTCTL_EXIT=0', 'SOFTCTL_EXIT=0oops\r\n', 'SOFTCTL_EXIT=0\r\nextra', 'SOFTCTL_EXIT=999999999999999\r\n']) {
+        h.files.set(batch + '.exit', invalid);
+        h.timeout(1000);
+        assert.equal(h.replies.length, 0, 'résultat invalide ignoré : ' + JSON.stringify(invalid));
+    }
+    h.files.set(batch + '.exit', 'SOFTCTL_EXIT=5\r\n');
+    h.timeout(1000);
+    assert.equal(h.replies[0].exit, 5, 'le code réel prime sur le texte du logiciel');
+    assert.equal(h.timers.size, 0);
+});
+
+test('résultat disponible à la dernière seconde : pas de faux timeout', () => {
+    const h = harness();
+    h.install({ installer: 'Setup.exe' });
+    h.files.set(h.installerBatch() + '.exit', 'SOFTCTL_EXIT=0\r\n');
+    h.timeout(30 * 60 * 1000);
+    assert.equal(h.replies.length, 1);
+    assert.equal(h.replies[0].exit, 0);
+    assert.equal(h.replies[0].error, undefined);
+    assert.equal(h.children[0].killCount, 0);
+    assert.equal(h.timers.size, 0);
+});
+
+test('un ancien résultat est supprimé avant le lancement', () => {
+    const h = harness({ staleStatus: true });
+    h.install({ installer: 'Setup.exe' });
+    const batch = h.installerBatch();
+    assert.equal(h.files.has(batch + '.exit'), false);
+    assert.equal(h.files.has(batch + '.exit.tmp'), false);
+    h.timeout(1000);
+    assert.equal(h.replies.length, 0);
+    h.children[0].complete(5);
+    assert.equal(h.replies[0].exit, 5);
+    assert.equal(h.timers.size, 0);
+});
+
+test('ancien résultat impossible à supprimer : lancement refusé, aucun faux succès', () => {
+    const h = harness({ staleStatus: true, lockedStatus: true });
+    h.install({ installer: 'Setup.exe' });
+    assert.equal(h.children.length, 0);
+    assert.equal(h.replies.length, 1);
+    assert.equal(h.replies[0].exit, -1);
+    assert.match(h.replies[0].error, /EACCES/);
+    assert.equal(h.timers.size, 0);
 });

@@ -455,12 +455,12 @@ function doInstall(data) {
             // Ces marqueurs sont écrits par le batch, indépendamment du callback
             // JS : un log vide ne permettait pas de savoir si PowerShell avait fini.
             try {
-                fs.writeFileSync(extractBat, '@echo off\r\n'
+                fs.writeFileSync(extractBat, '@echo off\r\nsetlocal EnableExtensions DisableDelayedExpansion\r\nset "ERRORLEVEL="\r\n'
                     + '> "' + extractLog + '" echo SOFTCTL_EXTRACT_START\r\n'
                     + psLine + ' >> "' + extractLog + '" 2>&1\r\n'
                     + 'set "softctl_extract_exit=%errorlevel%"\r\n'
                     + '>> "' + extractLog + '" echo SOFTCTL_EXTRACT_EXIT=%softctl_extract_exit%\r\n'
-                    + 'exit /b %softctl_extract_exit%\r\n');
+                    + batchExitStatus(extractBat, 'softctl_extract_exit'));
             }
             catch (e) { L('write extractBat: ' + e); return done(-1, 'extractBat: ' + e); }
             L('extract via Expand-Archive -> ' + extractDir);
@@ -688,27 +688,69 @@ function readAgentTextFile(filename) {
     catch (_) { return String.fromCharCode.apply(null, buf); }
 }
 
+function batchExitStatus(batchPath, codeVariable) {
+    // Le résultat est publié seulement une fois son écriture terminée. Ne pas
+    // déduire un succès du texte du logiciel ou d'un fichier encore incomplet.
+    var statusPath = batchPath + '.exit';
+    return '> "' + statusPath + '.tmp" echo SOFTCTL_EXIT=%' + codeVariable + '%\r\n'
+        + 'move /y "' + statusPath + '.tmp" "' + statusPath + '" >nul 2>&1\r\n'
+        + 'exit /b %' + codeVariable + '%\r\n';
+}
+
 function runWindowsBatch(batchPath, timeoutMs, L, cb) {
     var cp = require('child_process');
+    var fs = require('fs');
     var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
-    var child, timer;
+    var statusPath = batchPath + '.exit';
+    var child, timer, pollTimer;
     var finished = false;
+    function clearStatus() {
+        if (fs.existsSync(statusPath)) fs.unlinkSync(statusPath);
+        if (fs.existsSync(statusPath + '.tmp')) fs.unlinkSync(statusPath + '.tmp');
+    }
     function finish(code, err, kill) {
         if (finished) return;
         // kill() peut lui-même déclencher exit : verrouiller AVANT de l'appeler.
         finished = true;
         if (timer != null) clearTimeout(timer);
+        if (pollTimer != null) clearTimeout(pollTimer);
         if (kill && child) { try { child.kill(); } catch (_) {} }
+        try { clearStatus(); } catch (_) {}
         cb(typeof code === 'number' ? code : -1, err);
     }
-    timer = setTimeout(function () { finish(-1, 'timeout (' + (timeoutMs / 60000) + ' min)', true); }, timeoutMs);
+    function finishFromStatus() {
+        if (finished) return true;
+        var code;
+        try {
+            if (!fs.existsSync(statusPath)) return false;
+            var match = /^SOFTCTL_EXIT=(-?\d+)\r?\n$/.exec(readAgentTextFile(statusPath));
+            if (!match) return false;
+            code = parseInt(match[1], 10);
+            if (!isFinite(code) || code < -2147483648 || code > 4294967295) return false;
+        } catch (_) { return false; } // Réessayer si Windows verrouille encore le fichier.
+        L('cmd exit recovered from status file: ' + code);
+        finish(code);
+        return true;
+    }
+    function pollStatus() {
+        pollTimer = null;
+        if (!finishFromStatus()) pollTimer = setTimeout(pollStatus, 1000);
+    }
     try {
+        // Un ancien fichier ne doit jamais valider une nouvelle exécution.
+        // Une erreur de suppression bloque le lancement au lieu de l'ignorer.
+        clearStatus();
+        timer = setTimeout(function () {
+            // Le batch a pu terminer juste avant l'échéance, entre deux lectures.
+            if (!finishFromStatus()) finish(-1, 'timeout (' + (timeoutMs / 60000) + ' min)', true);
+        }, timeoutMs);
+        pollTimer = setTimeout(pollStatus, 1000);
         // MeshAgent transmet argv tel quel à CreateProcess, y compris argv[0].
         // /s /c retire la paire externe de guillemets et préserve le chemin cité.
         child = cp.execFile(windir + '\\System32\\cmd.exe', ['cmd.exe', '/d', '/s', '/c', '""' + batchPath + '""']);
-        L('cmd started: ' + batchPath + ' (pid=' + child.pid + ')');
         child.on('exit', function (code) { finish(code); });
         child.on('error', function (err) { finish(-1, 'process error: ' + err, true); });
+        L('cmd started: ' + batchPath + ' (pid=' + child.pid + ', status=' + statusPath + ')');
         // MeshAgent peut différer exit tant que stdout/stderr restent en pause
         // avec des données. Les redirections du .bat ne couvrent pas cmd.exe.
         function drain(data) {
@@ -720,7 +762,7 @@ function runWindowsBatch(batchPath, timeoutMs, L, cb) {
         if (child.stderr) child.stderr.on('data', drain);
         if (child.stdin) child.stdin.end();
         // Certaines implémentations exposent exitCode, mais MeshAgent ne le
-        // garantit pas : la fin normale reste pilotée par l'événement exit.
+        // garantit pas : l'événement exit et le fichier restent les références.
         if (!finished && typeof child.exitCode === 'number') finish(child.exitCode);
     } catch (e) { finish(-1, 'spawn error: ' + e, true); }
 }
@@ -751,9 +793,14 @@ function runInstaller(target, silentArgs, L, done) {
     var targetDir = target.substring(0, Math.max(target.lastIndexOf('\\'), target.lastIndexOf('/')));
     try {
         // Les paquets ZIP peuvent lire leurs fichiers annexes par chemin relatif.
-        fs.writeFileSync(runBat, '@echo off\r\ncd /d "' + targetDir + '"\r\n'
-            + 'if errorlevel 1 exit /b %errorlevel%\r\n'
-            + cmdLine + ' > "' + runLog + '" 2>&1\r\nexit /b %errorlevel%\r\n');
+        fs.writeFileSync(runBat, '@echo off\r\nsetlocal EnableExtensions DisableDelayedExpansion\r\nset "ERRORLEVEL="\r\n'
+            + 'cd /d "' + targetDir + '" > "' + runLog + '" 2>&1\r\n'
+            + 'set "softctl_run_exit=%errorlevel%"\r\n'
+            + 'if not "%softctl_run_exit%"=="0" goto softctl_run_finish\r\n'
+            + cmdLine + ' >> "' + runLog + '" 2>&1\r\n'
+            + 'set "softctl_run_exit=%errorlevel%"\r\n'
+            + ':softctl_run_finish\r\n'
+            + batchExitStatus(runBat, 'softctl_run_exit'));
     } catch (e) {
         L('write runBat: ' + e);
         return done(-1, e);
