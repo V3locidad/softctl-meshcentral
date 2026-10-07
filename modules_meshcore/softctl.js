@@ -406,7 +406,6 @@ function compareVersions(a, b) {
 
 function doInstall(data) {
     var fs = require('fs');
-    var cp = require('child_process');
     var pathSep = (process.platform === 'win32') ? '\\' : '/';
     var tmpRoot = (process.env.TEMP || process.env.TMP || (process.platform === 'win32' ? 'C:\\Windows\\Temp' : '/tmp'));
     var tmpDir = tmpRoot + pathSep + 'softctl_' + Date.now() + '_' + Math.floor(Math.random() * 1e9);
@@ -417,7 +416,10 @@ function doInstall(data) {
     var log = [];
     function L(m) { log.push(m); dbg(m); }
 
+    var completed = false;
     function done(exit, err) {
+        if (completed) return;
+        completed = true;
         try { rmRf(tmpDir); } catch (e) {}
         reply({
             pluginaction: 'installComplete',
@@ -440,7 +442,6 @@ function doInstall(data) {
             if (!archiveInstaller) { L('zip mais archiveInstaller manquant'); return done(-1, 'archiveInstaller manquant'); }
             var extractDir = tmpDir + pathSep + 'extract';
             try { fs.mkdirSync(extractDir); } catch (e) {}
-            L('extract via tar -> ' + extractDir);
             // Extraction via PowerShell Expand-Archive : plus fiable que tar
             // sur les .zip Windows et permet de capturer stderr.
             var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
@@ -448,38 +449,37 @@ function doInstall(data) {
             var extractLog = tmpDir + pathSep + 'extract.log';
             var extractBat = tmpDir + pathSep + 'extract.bat';
             var psLine = '"' + psExe + '" -NoProfile -ExecutionPolicy Bypass -NonInteractive'
-                       + ' -Command "Expand-Archive -LiteralPath \'' + downloadPath + '\' -DestinationPath \'' + extractDir + '\' -Force"';
-            try { fs.writeFileSync(extractBat, '@echo off\r\n' + psLine + ' > "' + extractLog + '" 2>&1\r\n'); }
-            catch (e) { L('write extractBat: ' + e); return done(-1, 'extractBat: ' + e); }
-            L('extract via Expand-Archive');
+                       + ' -Command "$ErrorActionPreference = \'Stop\'; Expand-Archive -LiteralPath \''
+                       + downloadPath.replace(/'/g, "''") + '\' -DestinationPath \''
+                       + extractDir.replace(/'/g, "''") + '\' -Force"';
+            // Ces marqueurs sont écrits par le batch, indépendamment du callback
+            // JS : un log vide ne permettait pas de savoir si PowerShell avait fini.
             try {
-                var extChild = cp.execFile(windir + '\\System32\\cmd.exe', ['/c', extractBat]);
-                var extDone = false;
-                function onExtExit(code) {
-                    if (extDone) return; extDone = true;
-                    var stderr = '';
-                    try { if (fs.existsSync(extractLog)) stderr = fs.readFileSync(extractLog, 'utf8').toString(); } catch (_) {}
-                    try { fs.unlinkSync(extractLog); } catch (_) {}
-                    try { fs.unlinkSync(extractBat); } catch (_) {}
-                    if (code !== 0) {
-                        L('extract exit ' + code + ' : ' + (stderr || '(vide)').replace(/\r/g, '').slice(-400));
-                        return done(-1, 'extract exit ' + code);
-                    }
-                    var target = extractDir + pathSep + archiveInstaller.replace(/\//g, pathSep);
-                    if (!fs.existsSync(target)) { L('cible non trouvée: ' + target); return done(-1, 'cible introuvable dans le zip'); }
-                    L('extract OK, lancement: ' + target);
-                    runInstaller(target, silentArgs, L, done);
-                }
-                extChild.on('exit', onExtExit);
-                setTimeout(function () {
-                    if (extDone) return;
-                    try { extChild.kill(); } catch (_) {}
-                    extDone = true;
-                    L('extract timeout 10 min'); done(-1, 'extract timeout');
-                }, 10 * 60 * 1000);
-            } catch (e) {
-                L('extract spawn err: ' + e); done(-1, e);
+                fs.writeFileSync(extractBat, '@echo off\r\n'
+                    + '> "' + extractLog + '" echo SOFTCTL_EXTRACT_START\r\n'
+                    + psLine + ' >> "' + extractLog + '" 2>&1\r\n'
+                    + 'set "softctl_extract_exit=%errorlevel%"\r\n'
+                    + '>> "' + extractLog + '" echo SOFTCTL_EXTRACT_EXIT=%softctl_extract_exit%\r\n'
+                    + 'exit /b %softctl_extract_exit%\r\n');
             }
+            catch (e) { L('write extractBat: ' + e); return done(-1, 'extractBat: ' + e); }
+            L('extract via Expand-Archive -> ' + extractDir);
+            runWindowsBatch(extractBat, 10 * 60 * 1000, L, function (code, err) {
+                var stderr = '';
+                try { if (fs.existsSync(extractLog)) stderr = readAgentTextFile(extractLog); }
+                catch (e) { L('extract log: lecture impossible: ' + e); }
+                try { fs.unlinkSync(extractLog); } catch (_) {}
+                try { fs.unlinkSync(extractBat); } catch (_) {}
+                L('extract exit ' + code + (err ? ' : ' + err : ''));
+                if (stderr) L('extract out: ' + stderr.replace(/\r/g, '').slice(-1200));
+                if (err || code !== 0) {
+                    return done(-1, err || ('extract exit ' + code));
+                }
+                var target = extractDir + pathSep + archiveInstaller.replace(/\//g, pathSep);
+                if (!fs.existsSync(target)) { L('cible non trouvée: ' + target); return done(-1, 'cible introuvable dans le zip'); }
+                L('extract OK, lancement: ' + target);
+                runInstaller(target, silentArgs, L, done);
+            });
         } else {
             runInstaller(downloadPath, silentArgs, L, done);
         }
@@ -679,14 +679,54 @@ function doWingetInstall(data) {
     }
 }
 
-function runInstaller(target, silentArgs, L, done) {
+function readAgentTextFile(filename) {
+    // L'API fs de MeshAgent n'accepte pas l'argument encoding de Node.js.
+    var buf = require('fs').readFileSync(filename);
+    if (buf == null) return '';
+    if (typeof buf === 'string') return buf;
+    try { return buf.toString('utf8'); }
+    catch (_) { return String.fromCharCode.apply(null, buf); }
+}
+
+function runWindowsBatch(batchPath, timeoutMs, L, cb) {
     var cp = require('child_process');
-    var ext = target.toLowerCase().split('.').pop();
     var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
-    // Wrapper cmd.exe /c — MeshAgent en service bloque le stdio des process
-    // lancés directement. Passer par cmd détache proprement et écrit le code
-    // retour qu'on lit ensuite.
-    var exe = windir + '\\System32\\cmd.exe';
+    var child, timer;
+    var finished = false;
+    function finish(code, err, kill) {
+        if (finished) return;
+        // kill() peut lui-même déclencher exit : verrouiller AVANT de l'appeler.
+        finished = true;
+        if (timer != null) clearTimeout(timer);
+        if (kill && child) { try { child.kill(); } catch (_) {} }
+        cb(typeof code === 'number' ? code : -1, err);
+    }
+    timer = setTimeout(function () { finish(-1, 'timeout (' + (timeoutMs / 60000) + ' min)', true); }, timeoutMs);
+    try {
+        // MeshAgent transmet argv tel quel à CreateProcess, y compris argv[0].
+        // /s /c retire la paire externe de guillemets et préserve le chemin cité.
+        child = cp.execFile(windir + '\\System32\\cmd.exe', ['cmd.exe', '/d', '/s', '/c', '""' + batchPath + '""']);
+        L('cmd started: ' + batchPath + ' (pid=' + child.pid + ')');
+        child.on('exit', function (code) { finish(code); });
+        child.on('error', function (err) { finish(-1, 'process error: ' + err, true); });
+        // MeshAgent peut différer exit tant que stdout/stderr restent en pause
+        // avec des données. Les redirections du .bat ne couvrent pas cmd.exe.
+        function drain(data) {
+            if (finished) return;
+            var txt = data.toString().replace(/\r/g, '').trim();
+            if (txt) L('cmd out: ' + txt.slice(-1200));
+        }
+        if (child.stdout) child.stdout.on('data', drain);
+        if (child.stderr) child.stderr.on('data', drain);
+        if (child.stdin) child.stdin.end();
+        // Certaines implémentations exposent exitCode, mais MeshAgent ne le
+        // garantit pas : la fin normale reste pilotée par l'événement exit.
+        if (!finished && typeof child.exitCode === 'number') finish(child.exitCode);
+    } catch (e) { finish(-1, 'spawn error: ' + e, true); }
+}
+
+function runInstaller(target, silentArgs, L, done) {
+    var ext = target.toLowerCase().split('.').pop();
     var cmdLine;
     if (ext === 'msi') {
         // Force /qn /norestart sauf si l'utilisateur a déjà mis /q...
@@ -696,6 +736,8 @@ function runInstaller(target, silentArgs, L, done) {
         cmdLine = 'msiexec.exe /i "' + target + '" ' + msiArgs;
     } else {
         cmdLine = '"' + target + '"' + (silentArgs ? ' ' + silentArgs : '');
+        // Un .cmd/.bat doit rendre la main au wrapper pour propager son code.
+        if (ext === 'cmd' || ext === 'bat') cmdLine = 'call ' + cmdLine;
     }
     // Capture stdout+stderr du .cmd/.exe pour pouvoir diagnostiquer un bail.
     // On passe par un .bat intermédiaire pour éviter le piège de cmd /c qui
@@ -706,21 +748,21 @@ function runInstaller(target, silentArgs, L, done) {
     var stamp = Date.now() + '_' + Math.floor(Math.random() * 1e9);
     var runLog = tmpRoot + '\\softctl_run_' + stamp + '.log';
     var runBat = tmpRoot + '\\softctl_run_' + stamp + '.bat';
+    var targetDir = target.substring(0, Math.max(target.lastIndexOf('\\'), target.lastIndexOf('/')));
     try {
-        fs.writeFileSync(runBat, '@echo off\r\n' + cmdLine + ' > "' + runLog + '" 2>&1\r\n');
+        // Les paquets ZIP peuvent lire leurs fichiers annexes par chemin relatif.
+        fs.writeFileSync(runBat, '@echo off\r\ncd /d "' + targetDir + '"\r\n'
+            + 'if errorlevel 1 exit /b %errorlevel%\r\n'
+            + cmdLine + ' > "' + runLog + '" 2>&1\r\nexit /b %errorlevel%\r\n');
     } catch (e) {
         L('write runBat: ' + e);
         return done(-1, e);
     }
-    var argv = ['/c', runBat];
     L('exec cmd /c ' + cmdLine);
     function readRunLog() {
         var txt = '';
         try {
-            var buf = fs.readFileSync(runLog);
-            if (buf == null) txt = '';
-            else if (typeof buf === 'string') txt = buf;
-            else { try { txt = buf.toString('utf8'); } catch (_) { try { txt = String.fromCharCode.apply(null, buf); } catch (__) { txt = ''; } } }
+            txt = readAgentTextFile(runLog);
         } catch (e) { L('out: (lecture log impossible: ' + e + ')'); }
         if (txt) {
             try {
@@ -732,42 +774,11 @@ function runInstaller(target, silentArgs, L, done) {
         try { fs.unlinkSync(runLog); } catch (_) {}
         try { fs.unlinkSync(runBat); } catch (_) {}
     }
-    try {
-        var child = cp.execFile(exe, argv);
-        var finished = false;
-        // Listener exit AVANT toute autre opération — sinon on rate l'event
-        // si le process sort instantanément (cas msiexec qui délègue à un
-        // service Windows Installer et exit immédiatement).
-        try {
-            child.on('exit', function (code) {
-                if (finished) return;
-                finished = true;
-                readRunLog();
-                L('exit ' + code);
-                done(typeof code === 'number' ? code : -1);
-            });
-        } catch (e) {}
-        // Si déjà exited entre temps (race), on déclenche manuellement.
-        if (typeof child.exitCode === 'number' && !finished) {
-            finished = true;
-            readRunLog();
-            L('exit (immédiat) ' + child.exitCode);
-            done(child.exitCode);
-            return;
-        }
-        // Timeout dur de sécurité : 30 min sans exit -> on kill.
-        setTimeout(function () {
-            if (finished) return;
-            finished = true;
-            try { child.kill(); } catch (e) {}
-            readRunLog();
-            L('timeout (30 min)');
-            done(-1, 'timeout');
-        }, 30 * 60 * 1000);
-    } catch (e) {
-        L('spawn error: ' + e);
-        done(-1, e);
-    }
+    runWindowsBatch(runBat, 30 * 60 * 1000, L, function (code, err) {
+        readRunLog();
+        L('exit ' + code + (err ? ' : ' + err : ''));
+        done(code, err);
+    });
 }
 
 function download(url, dest, cb) {
