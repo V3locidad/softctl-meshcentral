@@ -13,6 +13,11 @@
 "use strict";
 
 var mesh = null;
+// Les anciens MeshAgent ne retiennent pas les timers ni les child_process.
+// Une fermeture locale cyclique peut être collectée : les timers disparaissent
+// et le finalizer de child_process tue alors le batch sans callback de fin.
+// Garder chaque exécution accessible depuis le module jusqu'à son résultat.
+var activeWindowsBatches = {};
 
 function dbg(m) {
     try {
@@ -702,7 +707,8 @@ function runWindowsBatch(batchPath, timeoutMs, L, cb) {
     var fs = require('fs');
     var windir = process.env.windir || process.env.WINDIR || 'C:\\Windows';
     var statusPath = batchPath + '.exit';
-    var child, timer, pollTimer;
+    var run = { child: null, timer: null, pollTimer: null };
+    activeWindowsBatches[batchPath] = run;
     var finished = false;
     function clearStatus() {
         if (fs.existsSync(statusPath)) fs.unlinkSync(statusPath);
@@ -712,10 +718,11 @@ function runWindowsBatch(batchPath, timeoutMs, L, cb) {
         if (finished) return;
         // kill() peut lui-même déclencher exit : verrouiller AVANT de l'appeler.
         finished = true;
-        if (timer != null) clearTimeout(timer);
-        if (pollTimer != null) clearTimeout(pollTimer);
-        if (kill && child) { try { child.kill(); } catch (_) {} }
+        if (run.timer != null) { try { clearTimeout(run.timer); } catch (e) { L('cmd timer cleanup: ' + e); } run.timer = null; }
+        if (run.pollTimer != null) { try { clearTimeout(run.pollTimer); } catch (e) { L('cmd poll cleanup: ' + e); } run.pollTimer = null; }
+        if (kill && run.child) { try { run.child.kill(); } catch (_) {} }
         try { clearStatus(); } catch (_) {}
+        delete activeWindowsBatches[batchPath];
         cb(typeof code === 'number' ? code : -1, err);
     }
     function finishFromStatus() {
@@ -733,21 +740,24 @@ function runWindowsBatch(batchPath, timeoutMs, L, cb) {
         return true;
     }
     function pollStatus() {
-        pollTimer = null;
-        if (!finishFromStatus()) pollTimer = setTimeout(pollStatus, 1000);
+        run.pollTimer = null;
+        if (!finishFromStatus()) run.pollTimer = setTimeout(pollStatus, 1000);
     }
     try {
         // Un ancien fichier ne doit jamais valider une nouvelle exécution.
         // Une erreur de suppression bloque le lancement au lieu de l'ignorer.
         clearStatus();
-        timer = setTimeout(function () {
+        run.timer = setTimeout(function () {
+            // MeshAgent invalide le handle AVANT cet appel. clearTimeout sur
+            // ce handle levait une exception et empêchait le report du timeout.
+            run.timer = null;
             // Le batch a pu terminer juste avant l'échéance, entre deux lectures.
             if (!finishFromStatus()) finish(-1, 'timeout (' + (timeoutMs / 60000) + ' min)', true);
         }, timeoutMs);
-        pollTimer = setTimeout(pollStatus, 1000);
+        run.pollTimer = setTimeout(pollStatus, 1000);
         // MeshAgent transmet argv tel quel à CreateProcess, y compris argv[0].
         // /s /c retire la paire externe de guillemets et préserve le chemin cité.
-        child = cp.execFile(windir + '\\System32\\cmd.exe', ['cmd.exe', '/d', '/s', '/c', '""' + batchPath + '""']);
+        var child = run.child = cp.execFile(windir + '\\System32\\cmd.exe', ['cmd.exe', '/d', '/s', '/c', '""' + batchPath + '""']);
         child.on('exit', function (code) { finish(code); });
         child.on('error', function (err) { finish(-1, 'process error: ' + err, true); });
         L('cmd started: ' + batchPath + ' (pid=' + child.pid + ', status=' + statusPath + ')');

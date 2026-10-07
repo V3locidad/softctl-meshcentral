@@ -70,7 +70,12 @@ function harness(options = {}) {
             throw new Error('Unexpected module: ' + name);
         },
         setTimeout(fn, ms) { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
-        clearTimeout(id) { timers.delete(id); },
+        clearTimeout(id) {
+            // MeshAgent retire le handle avant d'appeler le callback. Annuler
+            // un timer expiré lève une erreur, contrairement à Node.js.
+            assert.ok(timers.has(id), 'timers.clearTimeout(): Invalid Parameter');
+            timers.delete(id);
+        },
     });
     vm.runInContext(source, context);
     context.dbg = () => {};
@@ -102,8 +107,46 @@ function harness(options = {}) {
         assert.ok(filename, 'batch de lancement attendu');
         return filename;
     }
-    return { files, timers, children, replies, removed, install, extraction, timeout, installerBatch };
+    return { files, timers, children, replies, removed, install, extraction, timeout, installerBatch,
+        activeBatches: context.activeWindowsBatches };
 }
+
+test('MeshAgent ancien : conserve processus et timers depuis le module jusqu’au résultat', () => {
+    const h = harness();
+    h.install({ installer: 'Setup.exe' });
+    const batch = h.installerBatch();
+    const active = h.activeBatches[batch];
+    assert.equal(active.child, h.children[0]);
+    assert.ok(h.timers.has(active.timer));
+    assert.ok(h.timers.has(active.pollTimer));
+    const previousPoll = active.pollTimer;
+    h.timeout(1000);
+    assert.notEqual(active.pollTimer, previousPoll);
+    assert.ok(h.timers.has(active.pollTimer), 'le nouveau poll reste accessible');
+    h.files.set(batch + '.exit', 'SOFTCTL_EXIT=0\r\n');
+    h.timeout(1000);
+    assert.equal(h.replies.length, 1);
+    assert.equal(h.replies[0].exit, 0);
+    assert.equal(Object.keys(h.activeBatches).length, 0);
+    assert.equal(h.timers.size, 0);
+});
+
+test('exécutions simultanées : terminer un batch ne libère pas les autres', () => {
+    const h = harness();
+    h.install({ installer: 'One.exe', dispatchId: 'one' });
+    h.install({ installer: 'Two.exe', dispatchId: 'two' });
+    assert.equal(Object.keys(h.activeBatches).length, 2);
+    h.children[0].complete(0);
+    const remaining = Object.values(h.activeBatches);
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0].child, h.children[1]);
+    assert.ok(h.timers.has(remaining[0].timer));
+    h.timeout(30 * 60 * 1000);
+    assert.equal(Object.keys(h.activeBatches).length, 0);
+    assert.equal(h.replies.length, 2);
+    assert.equal(h.replies[1].dispatchId, 'two');
+    assert.match(h.replies[1].error, /timeout/);
+});
 
 test('ZIP : poursuit après extraction même si cmd produit stdout/stderr, puis remonte un seul résultat', () => {
     const h = harness();
@@ -128,6 +171,7 @@ test('ZIP : poursuit après extraction même si cmd produit stdout/stderr, puis 
     assert.match(h.replies[0].log, /installation terminée/);
     assert.equal(h.removed.length, 1);
     assert.equal(h.timers.size, 0);
+    assert.equal(Object.keys(h.activeBatches).length, 0);
 });
 
 test('cmd reçoit argv[0] et un chemin de batch avec espaces correctement cité', () => {
@@ -189,6 +233,7 @@ test('échec de création du processus : erreur remontée sans timer restant', (
     assert.equal(h.replies.length, 1);
     assert.match(h.replies[0].error, /CreateProcess failed/);
     assert.equal(h.timers.size, 0);
+    assert.equal(Object.keys(h.activeBatches).length, 0);
 });
 
 for (const installer of ['Setup.exe', 'Setup.msi', 'Setup.cmd']) {
